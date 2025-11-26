@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ParentSlop</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #05060a;
+      --bg-alt: #11121a;
+      --card-bg: #181926;
+      --accent: #66d9ef;
+      --accent-soft: rgba(102, 217, 239, 0.16);
+      --accent-strong: rgba(102, 217, 239, 0.44);
+      --text: #f7f7ff;
+      --muted: #a0a4be;
+      --border-subtle: #25273a;
+      --danger: #ff6b81;
+      --radius-lg: 18px;
+      --shadow-soft: 0 18px 45px rgba(0, 0, 0, 0.5);
+      --transition-fast: 160ms ease-out;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+        "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at top, #1b2035 0, #05060a 55%);
+      color: var(--text);
+    }
+
+    .page {
+      width: 100%;
+      max-width: 960px;
+      padding: 32px 20px 40px;
+    }
+
+    .shell {
+      background: linear-gradient(145deg, #090b12, #131426);
+      border-radius: 32px;
+      padding: 28px 24px 32px;
+      box-shadow: var(--shadow-soft);
+      border: 1px solid rgba(255, 255, 255, 0.03);
+      backdrop-filter: blur(18px);
+    }
+
+    header {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .logo-block {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .logo-ascii-wrapper {
+      max-height: 200px;
+      overflow: auto;
+      border-radius: 12px;
+      background: radial-gradient(circle at top left, #191b2a, #05060a);
+      border: 1px solid var(--border-subtle);
+      padding: 12px 14px 14px;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.01);
+    }
+
+    .logo-ascii {
+      margin: 0;
+      font-family: "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono",
+        "Courier New", monospace;
+      font-size: 11px;
+      line-height: 1.1;
+      color: var(--accent);
+      text-shadow: 0 0 12px rgba(102, 217, 239, 0.4);
+    }
+
+    .tagline {
+      font-size: 1rem;
+      color: var(--muted);
+      padding-left: 2px;
+    }
+
+    @media (min-width: 720px) {
+      header {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .logo-block {
+        flex: 1.7;
+      }
+    }
+
+    footer {
+      margin-top: 20px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      opacity: 0.7;
+      text-align: right;
+    }
+
+    footer span {
+      background: rgba(255, 255, 255, 0.02);
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.03);
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <main class="shell">
+      <header>
+        <div class="logo-block">
+          <div class="logo-ascii-wrapper" aria-hidden="true">
+            <pre class="logo-ascii">
+  ____                  _            _   ____  _
+ |  _ \ __ _ _ __ _ __ | | ___  _ __| | |  _ \| | __ _ _ __
+ | |_) / _` | '__| '_ \| |/ _ \| '__| | | |_) | |/ _` | '_ \
+ |  __/ (_| | |  | |_) | | (_) | |  | | |  __/| | (_| | |_) |
+ |_|   \__,_|_|  | .__/|_|\___/|_|  |_| |_|   |_|\__,_| .__/
+                  |_|                                 |_|
+            </pre>
+          </div>
+          <div class="tagline">Mobile gaming for kids by parents.</div>
+        </div>
+      </header>
+
+      <!-- Custom Element Mount -->
+      <parentslop-user-selector></parentslop-user-selector>
+
+      <footer>
+        <span>Early placeholder build · ParentSlop</span>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    // --- Simple localStorage-backed user store ------------------------------
+
+    const PARENTSLOP_USERS_KEY = "parentslop.users.v1";
+
+    function loadUsers() {
+      try {
+        const raw = localStorage.getItem(PARENTSLOP_USERS_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed;
+      } catch (e) {
+        console.warn("Failed to parse ParentSlop users from localStorage", e);
+        return [];
+      }
+    }
+
+    function saveUsers(users) {
+      localStorage.setItem(PARENTSLOP_USERS_KEY, JSON.stringify(users));
+    }
+
+    function createUser(name) {
+      return {
+        id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+        name: name || "New Player",
+        createdAt: new Date().toISOString()
+      };
+    }
+
+    // --- Custom Element: <parentslop-user-selector> ------------------------
+
+    class ParentSlopUserSelector extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: "open" });
+        this.users = loadUsers();
+      }
+
+      connectedCallback() {
+        this.render();
+      }
+
+      setUsers(users) {
+        this.users = users;
+        saveUsers(users);
+        this.render();
+      }
+
+      handleAddUser() {
+        const name = window.prompt("Enter a name for this child profile:", "");
+        if (name === null) return; // user cancelled
+        const trimmed = name.trim();
+        if (!trimmed) {
+          alert("Please enter a non-empty name.");
+          return;
+        }
+        const users = [...this.users, createUser(trimmed)];
+        this.setUsers(users);
+      }
+
+      handleDeleteUser(id) {
+        if (!confirm("Remove this user profile? This can't be undone.")) return;
+        const users = this.users.filter((u) => u.id !== id);
+        this.setUsers(users);
+      }
+
+      render() {
+        const users = this.users || [];
+
+        const style = `
+          :host {
+            display: block;
+          }
+
+          .panel {
+            border-radius: 24px;
+            padding: 18px 18px 20px;
+            background: radial-gradient(circle at top left, #1a1c2a, #090a13);
+            border: 1px solid var(--border-subtle, #26293b);
+            box-shadow: 0 14px 30px rgba(0, 0, 0, 0.55);
+          }
+
+          .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            margin-bottom: 16px;
+          }
+
+          .panel-title {
+            font-size: 0.95rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--muted, #a0a4be);
+          }
+
+          .panel-subtitle {
+            margin-top: 4px;
+            font-size: 0.8rem;
+            color: var(--muted, #a0a4be);
+            opacity: 0.85;
+          }
+
+          .users-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+          }
+
+          .user-card {
+            position: relative;
+            border-radius: var(--radius-lg, 18px);
+            padding: 14px 13px 13px;
+            background: linear-gradient(145deg, #181926, #10111b);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            cursor: default;
+            transition: transform var(--transition-fast, 160ms ease-out),
+                        box-shadow var(--transition-fast, 160ms ease-out),
+                        border-color var(--transition-fast, 160ms ease-out),
+                        background var(--transition-fast, 160ms ease-out);
+          }
+
+          .user-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent-soft, rgba(102, 217, 239, 0.2));
+            background: linear-gradient(
+              145deg,
+              #191b2a,
+              #141524
+            );
+            box-shadow: 0 18px 36px rgba(0, 0, 0, 0.7);
+          }
+
+          .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 12px;
+            background: radial-gradient(circle at 30% 0%, #ffffff20, #66d9ef40);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--accent, #66d9ef);
+          }
+
+          .user-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+          }
+
+          .user-name {
+            font-size: 0.95rem;
+            font-weight: 600;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            overflow: hidden;
+          }
+
+          .user-meta {
+            font-size: 0.75rem;
+            color: var(--muted, #a0a4be);
+            opacity: 0.9;
+          }
+
+          .user-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 9px;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            background: radial-gradient(circle at top, #252944, #121421);
+          }
+
+          .delete-btn {
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            width: 22px;
+            height: 22px;
+            border-radius: 999px;
+            border: none;
+            background: rgba(255, 107, 129, 0.1);
+            color: var(--danger, #ff6b81);
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transform: scale(0.9);
+            transition: opacity var(--transition-fast, 160ms ease-out),
+                        transform var(--transition-fast, 160ms ease-out),
+                        background var(--transition-fast, 160ms ease-out);
+          }
+
+          .user-card:hover .delete-btn {
+            opacity: 1;
+            transform: scale(1);
+          }
+
+          .delete-btn:hover {
+            background: rgba(255, 107, 129, 0.22);
+          }
+
+          .empty-state {
+            padding: 20px 16px 16px;
+            border-radius: 18px;
+            border: 1px dashed rgba(255, 255, 255, 0.08);
+            background: radial-gradient(circle at top, #191a28, #0b0b14);
+            font-size: 0.84rem;
+            color: var(--muted, #a0a4be);
+          }
+
+          .empty-state strong {
+            color: var(--accent, #66d9ef);
+          }
+
+          .toolbar {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 16px;
+          }
+
+          .btn {
+            appearance: none;
+            border: none;
+            border-radius: 999px;
+            padding: 9px 16px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            background: radial-gradient(circle at top left, #2b344e, #1b1e34);
+            color: var(--text, #f7f7ff);
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.7);
+            border: 1px solid var(--accent-strong, rgba(102, 217, 239, 0.4));
+            transition: transform var(--transition-fast, 160ms ease-out),
+                        box-shadow var(--transition-fast, 160ms ease-out),
+                        background var(--transition-fast, 160ms ease-out),
+                        border-color var(--transition-fast, 160ms ease-out);
+          }
+
+          .btn span.icon {
+            font-size: 1.1rem;
+            translate: 0 0.5px;
+          }
+
+          .btn:hover {
+            transform: translateY(-1px);
+            background: radial-gradient(circle at top left, #3a4670, #20243b);
+            box-shadow: 0 14px 32px rgba(0, 0, 0, 0.8);
+          }
+
+          .btn:active {
+            transform: translateY(0);
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.6);
+          }
+
+          @media (max-width: 520px) {
+            .panel {
+              padding: 14px 12px 16px;
+              border-radius: 20px;
+            }
+
+            .toolbar {
+              justify-content: stretch;
+            }
+
+            .btn {
+              width: 100%;
+              justify-content: center;
+            }
+          }
+        `;
+
+        const userCardsHtml =
+          users.length === 0
+            ? `
+              <div class="empty-state">
+                <strong>No child profiles yet.</strong><br />
+                Create a profile for each kid to link chores and rewards to their own
+                “slop” sessions later.
+              </div>
+            `
+            : `
+              <div class="users-grid">
+                ${users
+                  .map((user) => {
+                    const initial = (user.name || "?").trim().charAt(0).toUpperCase();
+                    const created = user.createdAt
+                      ? new Date(user.createdAt).toLocaleDateString()
+                      : "Just now";
+                    return `
+                      <article class="user-card" data-id="${user.id}">
+                        <button class="delete-btn" type="button" title="Remove user">×</button>
+                        <div class="user-header">
+                          <div class="user-avatar">${initial}</div>
+                          <div style="flex:1; min-width:0;">
+                            <div class="user-name" title="${user.name}">
+                              ${user.name}
+                            </div>
+                            <div class="user-meta">
+                              Added ${created}
+                            </div>
+                          </div>
+                        </div>
+                        <div class="user-meta" style="margin-top:8px;">
+                          <span class="user-pill">
+                            ● placeholder · no games yet
+                          </span>
+                        </div>
+                      </article>
+                    `;
+                  })
+                  .join("")}
+              </div>
+            `;
+
+        this.shadowRoot.innerHTML = `
+          <style>${style}</style>
+          <section class="panel" aria-label="ParentSlop child profile selector">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">Child profiles</div>
+                <div class="panel-subtitle">
+                  Local-only for now. We’ll hook in chores, points and games later.
+                </div>
+              </div>
+            </div>
+
+            ${userCardsHtml}
+
+            <div class="toolbar">
+              <button class="btn" type="button">
+                <span class="icon">＋</span>
+                <span>Add new user</span>
+              </button>
+            </div>
+          </section>
+        `;
+
+        const addBtn = this.shadowRoot.querySelector(".btn");
+        if (addBtn) {
+          addBtn.addEventListener("click", () => this.handleAddUser(), {
+            once: true
+          });
+        }
+
+        // Attach delete handlers
+        this.shadowRoot.querySelectorAll(".delete-btn").forEach((btn) => {
+          btn.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const card = btn.closest(".user-card");
+            if (!card) return;
+            const id = card.getAttribute("data-id");
+            if (!id) return;
+            this.handleDeleteUser(id);
+          });
+        });
+      }
+    }
+
+    customElements.define("parentslop-user-selector", ParentSlopUserSelector);
+  </script>
+</body>
+</html>
+
