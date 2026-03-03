@@ -28,11 +28,15 @@
       box-sizing: border-box;
     }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       min-height: 100vh;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       background: radial-gradient(circle at top, #1b2035 0, #05060a 55%);
       color: var(--text);
@@ -41,23 +45,31 @@
     .page {
       width: 100%;
       max-width: 960px;
-      padding: 32px 20px 40px;
+      padding: 20px 12px 120px;
+    }
+
+    @media (min-width: 720px) {
+      .page { padding: 32px 20px 40px; }
     }
 
     .shell {
       background: linear-gradient(145deg, #090b12, #131426);
       border-radius: 32px;
-      padding: 28px 24px 32px;
+      padding: 20px 16px 24px;
       box-shadow: var(--shadow-soft);
       border: 1px solid rgba(255, 255, 255, 0.03);
       backdrop-filter: blur(18px);
+    }
+
+    @media (min-width: 720px) {
+      .shell { padding: 28px 24px 32px; }
     }
 
     header {
       display: flex;
       flex-direction: column;
       gap: 16px;
-      margin-bottom: 24px;
+      margin-bottom: 16px;
     }
 
     .logo-block {
@@ -118,6 +130,221 @@
       border-radius: 999px;
       border: 1px solid rgba(255, 255, 255, 0.03);
     }
+
+    /* Tracker layout */
+    .tracker-layout {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .view-container > * {
+      display: none;
+    }
+
+    .view-container > .active {
+      display: block;
+    }
+
+    /* Admin sub-nav */
+    .admin-subnav {
+      display: flex;
+      gap: 2px;
+      padding: 3px;
+      background: #0d0e16;
+      border: 1px solid #25273a;
+      border-radius: 10px;
+      margin-bottom: 10px;
+      overflow-x: auto;
+    }
+
+    .admin-subnav button {
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: #a0a4be;
+      font-size: 0.74rem;
+      font-family: inherit;
+      padding: 6px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 160ms ease-out, color 160ms ease-out;
+    }
+
+    .admin-subnav button:hover {
+      background: rgba(255, 255, 255, 0.04);
+      color: #f7f7ff;
+    }
+
+    .admin-subnav button.active {
+      background: radial-gradient(circle at top left, #2b344e, #1b1e34);
+      color: #66d9ef;
+    }
+
+    /* Game selector for games tab */
+    .games-grid-inline {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+    }
+
+    .game-card-inline {
+      border-radius: 18px;
+      padding: 14px 13px 13px;
+      background: linear-gradient(145deg, #181a26, #0f101a);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform 160ms ease-out, box-shadow 160ms ease-out,
+                  border-color 160ms ease-out;
+    }
+
+    .game-card-inline:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent-soft);
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.7);
+    }
+
+    .game-card-inline .game-title {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .game-card-inline .game-meta {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    /* Full-page game overlay */
+    .overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 999;
+      background: radial-gradient(circle at top, #15182a, #02030a);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .overlay-header {
+      padding: 10px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: rgba(0, 0, 0, 0.6);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(14px);
+    }
+
+    .overlay-title {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .overlay-title strong {
+      color: var(--accent);
+    }
+
+    .overlay-close-btn {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      background: radial-gradient(circle at top left, #2b344e, #1b1e34);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .overlay-body {
+      flex: 1;
+      min-height: 0;
+    }
+
+    .overlay-body iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+      background: #000;
+    }
+
+    /* Toast notification */
+    .toast-container {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: none;
+    }
+
+    .toast {
+      padding: 10px 20px;
+      border-radius: 12px;
+      font-size: 0.84rem;
+      font-weight: 500;
+      color: #f7f7ff;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      animation: toast-in 300ms ease-out;
+      pointer-events: auto;
+    }
+
+    .toast.success { background: rgba(80, 250, 123, 0.2); border: 1px solid rgba(80, 250, 123, 0.3); }
+    .toast.warning { background: rgba(241, 250, 140, 0.2); border: 1px solid rgba(241, 250, 140, 0.3); color: #f1fa8c; }
+    .toast.danger { background: rgba(255, 107, 129, 0.2); border: 1px solid rgba(255, 107, 129, 0.3); color: #ff6b81; }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Data export/import panel */
+    .data-panel {
+      border-radius: 24px;
+      padding: 18px;
+      background: radial-gradient(circle at top left, #1a1c2a, #090a13);
+      border: 1px solid #25273a;
+    }
+
+    .data-panel h3 {
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #a0a4be;
+      margin: 0 0 12px;
+    }
+
+    .data-btn {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 9px 16px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: radial-gradient(circle at top left, #2b344e, #1b1e34);
+      color: #f7f7ff;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(102, 217, 239, 0.44);
+      margin-right: 8px;
+      font-family: inherit;
+      transition: transform 160ms ease-out;
+    }
+
+    .data-btn:hover { transform: translateY(-1px); }
   </style>
 </head>
 <body>
@@ -135,21 +362,133 @@
                   |_|                                 |_|
             </pre>
           </div>
-          <div class="tagline">Mobile gaming for kids by parents.</div>
+          <div class="tagline">Task tracker & reward system for families.</div>
         </div>
       </header>
 
-      <!-- Custom Element Mount -->
-      <parentslop-user-selector></parentslop-user-selector>
+      <!-- Phase: Setup wizard (first run) -->
+      <ps-setup-wizard id="setup-wizard" hidden></ps-setup-wizard>
+
+      <!-- Phase: User selector (shown when switching users or no user selected) -->
+      <parentslop-user-selector id="user-selector" hidden></parentslop-user-selector>
+
+      <!-- Phase: Tracker (main app after user selected) -->
+      <div id="tracker-app" class="tracker-layout" hidden>
+        <ps-balance-bar></ps-balance-bar>
+        <ps-nav-bar></ps-nav-bar>
+
+        <div class="view-container" id="view-container">
+          <!-- Dashboard -->
+          <ps-dashboard id="view-dashboard" class="active"></ps-dashboard>
+
+          <!-- Tasks -->
+          <ps-task-list id="view-tasks"></ps-task-list>
+
+          <!-- Shop -->
+          <ps-reward-shop id="view-shop"></ps-reward-shop>
+
+          <!-- History -->
+          <ps-history id="view-history"></ps-history>
+
+          <!-- Games tab -->
+          <div id="view-games">
+            <div style="border-radius:24px; padding:18px; background:radial-gradient(circle at top left,#1a1c2a,#090a13); border:1px solid #25273a; box-shadow:0 14px 30px rgba(0,0,0,0.55);">
+              <div style="font-size:0.95rem; letter-spacing:0.04em; text-transform:uppercase; color:#a0a4be; margin-bottom:4px;">Games</div>
+              <div style="font-size:0.8rem; color:#a0a4be; opacity:0.85; margin-bottom:14px;">Pick a game to play.</div>
+              <div class="games-grid-inline" id="games-grid"></div>
+            </div>
+          </div>
+
+          <!-- Admin -->
+          <div id="view-admin">
+            <div class="admin-subnav" id="admin-subnav">
+              <button class="active" data-admin-tab="tasks">Tasks</button>
+              <button data-admin-tab="approvals">Approvals</button>
+              <button data-admin-tab="currencies">Currencies</button>
+              <button data-admin-tab="shop">Shop</button>
+              <button data-admin-tab="users">Users</button>
+              <button data-admin-tab="log">Log</button>
+              <button data-admin-tab="feedback">Feedback</button>
+              <button data-admin-tab="data">Data</button>
+            </div>
+            <div id="admin-content">
+              <ps-admin-tasks id="admin-tasks" class="active"></ps-admin-tasks>
+              <ps-admin-approvals id="admin-approvals"></ps-admin-approvals>
+              <ps-admin-currencies id="admin-currencies"></ps-admin-currencies>
+              <ps-admin-shop id="admin-shop"></ps-admin-shop>
+              <ps-admin-users id="admin-users"></ps-admin-users>
+              <ps-admin-log id="admin-log"></ps-admin-log>
+              <ps-admin-feedback id="admin-feedback"></ps-admin-feedback>
+              <div id="admin-data">
+                <div class="data-panel">
+                  <h3>Data Management</h3>
+                  <p style="font-size:0.82rem; color:#a0a4be; margin:0 0 14px;">Export or import all app data as JSON.</p>
+                  <button class="data-btn" id="export-btn">Export Data</button>
+                  <button class="data-btn" id="import-btn">Import Data</button>
+                  <input type="file" id="import-file" accept=".json" hidden />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <footer>
-        <span>Early placeholder build · ParentSlop</span>
+        <span>ParentSlop · Task & Reward Tracker</span>
       </footer>
     </main>
+
+    <!-- Feedback jot FAB (global, outside #tracker-app) -->
+    <ps-feedback-fab></ps-feedback-fab>
   </div>
 
+  <!-- Timer overlay (global) -->
+  <ps-task-timer></ps-task-timer>
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Full-page game dialog -->
+  <div id="game-overlay" class="overlay" hidden>
+    <div class="overlay-header">
+      <div class="overlay-title">
+        Playing <strong id="overlay-game-name">Game</strong>
+        <span id="overlay-user-label"></span>
+      </div>
+      <button class="overlay-close-btn" type="button" id="overlay-close-btn">
+        Close
+      </button>
+    </div>
+    <div class="overlay-body">
+      <iframe id="game-frame" src=""></iframe>
+    </div>
+  </div>
+
+  <!-- Core tracker script (must load first) -->
+  <script src="/tracker/core.js"></script>
+  <script src="/tracker/sfx.js"></script>
+
+  <!-- Components (order doesn't matter after core + sfx) -->
+  <script src="/tracker/components/ps-setup-wizard.js"></script>
+  <script src="/tracker/components/ps-nav-bar.js"></script>
+  <script src="/tracker/components/ps-balance-bar.js"></script>
+  <script src="/tracker/components/ps-dashboard.js"></script>
+  <script src="/tracker/components/ps-task-list.js"></script>
+  <script src="/tracker/components/ps-task-timer.js"></script>
+  <script src="/tracker/components/ps-streak-badge.js"></script>
+  <script src="/tracker/components/ps-reward-shop.js"></script>
+  <script src="/tracker/components/ps-admin-tasks.js"></script>
+  <script src="/tracker/components/ps-admin-shop.js"></script>
+  <script src="/tracker/components/ps-admin-currencies.js"></script>
+  <script src="/tracker/components/ps-admin-approvals.js"></script>
+  <script src="/tracker/components/ps-admin-users.js"></script>
+  <script src="/tracker/components/ps-admin-log.js"></script>
+  <script src="/tracker/components/ps-admin-feedback.js"></script>
+  <script src="/tracker/components/ps-history.js"></script>
+  <script src="/tracker/components/ps-feedback-fab.js"></script>
+
   <script>
-    // --- Simple localStorage-backed user store ------------------------------
+    // --- Simple localStorage-backed user store (kept for backward compat) -----
 
     const PARENTSLOP_USERS_KEY = "parentslop.users.v1";
 
@@ -174,11 +513,13 @@
       return {
         id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
         name: name || "New Player",
+        isAdmin: false,
+        balances: {},
         createdAt: new Date().toISOString()
       };
     }
 
-    // --- Custom Element: <parentslop-user-selector> ------------------------
+    // --- <parentslop-user-selector> ----------------------------------------
 
     class ParentSlopUserSelector extends HTMLElement {
       constructor() {
@@ -191,6 +532,11 @@
         this.render();
       }
 
+      refreshUsers() {
+        this.users = trackerStore.users.data;
+        this.render();
+      }
+
       setUsers(users) {
         this.users = users;
         saveUsers(users);
@@ -199,20 +545,46 @@
 
       handleAddUser() {
         const name = window.prompt("Enter a name for this child profile:", "");
-        if (name === null) return; // user cancelled
+        if (name === null) return;
         const trimmed = name.trim();
         if (!trimmed) {
           alert("Please enter a non-empty name.");
           return;
         }
         const users = [...this.users, createUser(trimmed)];
-        this.setUsers(users);
+        // Also add to tracker store
+        trackerStore.users.load();
+        trackerStore.users.data.push({
+          id: users[users.length - 1].id,
+          name: trimmed,
+          isAdmin: false,
+          balances: {},
+          createdAt: new Date().toISOString(),
+        });
+        trackerStore.users.save();
+        this.setUsers(trackerStore.users.data);
       }
 
       handleDeleteUser(id) {
         if (!confirm("Remove this user profile? This can't be undone.")) return;
         const users = this.users.filter((u) => u.id !== id);
-        this.setUsers(users);
+        // Also remove from tracker store
+        const idx = trackerStore.users.data.findIndex((u) => u.id === id);
+        if (idx >= 0) trackerStore.users.data.splice(idx, 1);
+        trackerStore.users.save();
+        this.setUsers(trackerStore.users.data);
+      }
+
+      handleUserSelect(id) {
+        const user = this.users.find((u) => u.id === id);
+        if (!user) return;
+        this.dispatchEvent(
+          new CustomEvent("user-selected", {
+            detail: { user },
+            bubbles: true,
+            composed: true
+          })
+        );
       }
 
       render() {
@@ -269,7 +641,7 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
-            cursor: default;
+            cursor: pointer;
             transition: transform var(--transition-fast, 160ms ease-out),
                         box-shadow var(--transition-fast, 160ms ease-out),
                         border-color var(--transition-fast, 160ms ease-out),
@@ -279,11 +651,7 @@
           .user-card:hover {
             transform: translateY(-2px);
             border-color: var(--accent-soft, rgba(102, 217, 239, 0.2));
-            background: linear-gradient(
-              145deg,
-              #191b2a,
-              #141524
-            );
+            background: linear-gradient(145deg, #191b2a, #141524);
             box-shadow: 0 18px 36px rgba(0, 0, 0, 0.7);
           }
 
@@ -330,6 +698,12 @@
             font-size: 0.7rem;
             border: 1px solid rgba(255, 255, 255, 0.04);
             background: radial-gradient(circle at top, #252944, #121421);
+          }
+
+          .admin-badge {
+            background: rgba(102, 217, 239, 0.1);
+            color: #66d9ef;
+            border: 1px solid rgba(102, 217, 239, 0.15);
           }
 
           .delete-btn {
@@ -441,9 +815,8 @@
           users.length === 0
             ? `
               <div class="empty-state">
-                <strong>No child profiles yet.</strong><br />
-                Create a profile for each kid to link chores and rewards to their own
-                “slop” sessions later.
+                <strong>No user profiles yet.</strong><br />
+                Create a profile to get started.
               </div>
             `
             : `
@@ -454,6 +827,11 @@
                     const created = user.createdAt
                       ? new Date(user.createdAt).toLocaleDateString()
                       : "Just now";
+                    // Show balance summary
+                    const currencies = trackerStore.currencies.data || [];
+                    const balText = currencies
+                      .map((c) => tracker.formatAmount(tracker.getBalance(user.id, c.id), c.id))
+                      .join("  ");
                     return `
                       <article class="user-card" data-id="${user.id}">
                         <button class="delete-btn" type="button" title="Remove user">×</button>
@@ -469,8 +847,8 @@
                           </div>
                         </div>
                         <div class="user-meta" style="margin-top:8px;">
-                          <span class="user-pill">
-                            ● placeholder · no games yet
+                          <span class="user-pill ${user.isAdmin ? "admin-badge" : ""}">
+                            ${user.isAdmin ? "⚙ Admin" : balText || "No balance"}
                           </span>
                         </div>
                       </article>
@@ -482,12 +860,12 @@
 
         this.shadowRoot.innerHTML = `
           <style>${style}</style>
-          <section class="panel" aria-label="ParentSlop child profile selector">
+          <section class="panel" aria-label="ParentSlop user selector">
             <div class="panel-header">
               <div>
-                <div class="panel-title">Child profiles</div>
+                <div class="panel-title">Select User</div>
                 <div class="panel-subtitle">
-                  Local-only for now. We’ll hook in chores, points and games later.
+                  Choose who's using ParentSlop right now.
                 </div>
               </div>
             </div>
@@ -505,12 +883,9 @@
 
         const addBtn = this.shadowRoot.querySelector(".btn");
         if (addBtn) {
-          addBtn.addEventListener("click", () => this.handleAddUser(), {
-            once: true
-          });
+          addBtn.addEventListener("click", () => this.handleAddUser());
         }
 
-        // Attach delete handlers
         this.shadowRoot.querySelectorAll(".delete-btn").forEach((btn) => {
           btn.addEventListener("click", (event) => {
             event.stopPropagation();
@@ -521,11 +896,261 @@
             this.handleDeleteUser(id);
           });
         });
+
+        this.shadowRoot.querySelectorAll(".user-card").forEach((card) => {
+          card.addEventListener("click", () => {
+            const id = card.getAttribute("data-id");
+            if (!id) return;
+            this.handleUserSelect(id);
+          });
+        });
       }
     }
 
     customElements.define("parentslop-user-selector", ParentSlopUserSelector);
+
+    // --- Games list ----------------------------------------------------------
+
+    const GAMES = [
+      {
+        id: "slopcolor",
+        name: "Slop Color",
+        description: "Prototype tap-color slop. High dopamine, zero ads.",
+        url: "/games/slopcolor/index.html",
+        status: "Prototype"
+      },
+      {
+        id: "solitaire",
+        name: "Solitaire",
+        description: "Classic card game. Focus and patience.",
+        url: "https://www.mathster.com/games/solitaire/",
+        status: "External"
+      }
+    ];
+
+    // --- Page wiring ---------------------------------------------------------
+
+    window.addEventListener("DOMContentLoaded", async () => {
+      await tracker.initStores();
+      const setupWizard = document.getElementById("setup-wizard");
+      const userSelector = document.getElementById("user-selector");
+      const trackerApp = document.getElementById("tracker-app");
+      const viewContainer = document.getElementById("view-container");
+      const overlay = document.getElementById("game-overlay");
+      const gameFrame = document.getElementById("game-frame");
+      const overlayCloseBtn = document.getElementById("overlay-close-btn");
+      const overlayGameName = document.getElementById("overlay-game-name");
+      const overlayUserLabel = document.getElementById("overlay-user-label");
+      const toastContainer = document.getElementById("toast-container");
+
+      // ---- Determine initial state ----
+      const app = trackerStore.app.data;
+
+      function showSetup() {
+        setupWizard.hidden = false;
+        userSelector.hidden = true;
+        trackerApp.hidden = true;
+      }
+
+      function showUserSelector() {
+        setupWizard.hidden = true;
+        userSelector.hidden = false;
+        trackerApp.hidden = true;
+        // Refresh user list from store
+        userSelector.refreshUsers();
+      }
+
+      function showTracker() {
+        setupWizard.hidden = true;
+        userSelector.hidden = true;
+        trackerApp.hidden = false;
+        switchView(trackerStore.app.data.currentView || "dashboard");
+      }
+
+      // Initial routing
+      if (!app.setupComplete) {
+        showSetup();
+      } else if (!app.currentUserId) {
+        showUserSelector();
+      } else {
+        showTracker();
+      }
+
+      // ---- Setup complete ----
+      eventBus.on("setup:complete", () => {
+        showTracker();
+        eventBus.emit("user:changed", { userId: trackerStore.app.data.currentUserId });
+      });
+
+      // ---- User selected ----
+      document.addEventListener("user-selected", (event) => {
+        const user = event.detail?.user;
+        if (!user) return;
+
+        const appData = trackerStore.app.data;
+        appData.currentUserId = user.id;
+        appData.currentView = "dashboard";
+        trackerStore.app.save();
+
+        showTracker();
+        eventBus.emit("user:changed", { userId: user.id });
+      });
+
+      // ---- Switch user request ----
+      eventBus.on("user:switch-requested", () => {
+        trackerStore.app.data.currentUserId = null;
+        trackerStore.app.save();
+        showUserSelector();
+      });
+
+      // ---- View switching ----
+      function switchView(view) {
+        // Main views
+        const views = viewContainer.children;
+        for (const child of views) {
+          child.classList.remove("active");
+        }
+        const target = document.getElementById(`view-${view}`);
+        if (target) {
+          target.classList.add("active");
+        }
+      }
+
+      eventBus.on("nav:changed", (data) => {
+        switchView(data.view);
+      });
+
+      // ---- Admin sub-navigation ----
+      const adminSubnav = document.getElementById("admin-subnav");
+      const adminContent = document.getElementById("admin-content");
+
+      function switchAdminTab(tab) {
+        // Update subnav buttons
+        adminSubnav.querySelectorAll("button").forEach((b) => {
+          b.classList.toggle("active", b.dataset.adminTab === tab);
+        });
+        // Show/hide admin panels
+        for (const child of adminContent.children) {
+          child.style.display = "none";
+        }
+        const target = document.getElementById(`admin-${tab}`);
+        if (target) {
+          target.style.display = "block";
+        }
+      }
+
+      adminSubnav.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          switchAdminTab(btn.dataset.adminTab);
+        });
+      });
+
+      // Default admin tab
+      switchAdminTab("tasks");
+
+      // ---- Games tab ----
+      const gamesGrid = document.getElementById("games-grid");
+      gamesGrid.innerHTML = GAMES.map((g) => `
+        <div class="game-card-inline" data-game-id="${g.id}">
+          <div class="game-title">${g.name}</div>
+          <div class="game-meta">${g.description}</div>
+          <div style="margin-top:auto;">
+            <span style="font-size:0.7rem; border-radius:999px; padding:3px 8px; border:1px solid rgba(255,255,255,0.06); background:rgba(255,255,255,0.02); color:#a0a4be;">${g.status}</span>
+          </div>
+        </div>
+      `).join("");
+
+      gamesGrid.querySelectorAll(".game-card-inline").forEach((card) => {
+        card.addEventListener("click", () => {
+          const gameId = card.dataset.gameId;
+          const game = GAMES.find((g) => g.id === gameId);
+          if (!game) return;
+
+          const user = tracker.getCurrentUser();
+          overlayGameName.textContent = game.name;
+          overlayUserLabel.textContent = user ? ` · for ${user.name}` : "";
+          gameFrame.src = game.url;
+          overlay.hidden = false;
+        });
+      });
+
+      // ---- Game overlay close ----
+      function closeOverlay() {
+        overlay.hidden = true;
+        gameFrame.src = "";
+      }
+
+      overlayCloseBtn.addEventListener("click", closeOverlay);
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !overlay.hidden) {
+          closeOverlay();
+        }
+      });
+
+      // ---- Toast system ----
+      eventBus.on("toast:show", (data) => {
+        if (data.type === "danger" && typeof slopSFX !== "undefined") {
+          slopSFX.penalty();
+        }
+        const toast = document.createElement("div");
+        toast.className = `toast ${data.type || "success"}`;
+        toast.textContent = data.message;
+        toastContainer.appendChild(toast);
+        setTimeout(() => {
+          toast.style.opacity = "0";
+          toast.style.transition = "opacity 300ms ease-out";
+          setTimeout(() => toast.remove(), 300);
+        }, 2500);
+      });
+
+      // ---- Data export/import ----
+      document.getElementById("export-btn")?.addEventListener("click", () => {
+        const data = tracker.exportAllData();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `parentslop-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+
+      const importFile = document.getElementById("import-file");
+      document.getElementById("import-btn")?.addEventListener("click", () => {
+        importFile.click();
+      });
+
+      importFile?.addEventListener("change", (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            if (!confirm("This will overwrite all current data. Continue?")) return;
+            tracker.importAllData(data);
+            eventBus.emit("toast:show", { message: "Data imported!", type: "success" });
+            // Refresh UI
+            location.reload();
+          } catch (err) {
+            alert("Invalid JSON file.");
+          }
+        };
+        reader.readAsText(file);
+        importFile.value = "";
+      });
+
+      // ---- Data import event ----
+      eventBus.on("data:imported", () => {
+        // Force re-render
+        showTracker();
+      });
+
+      // ---- Timer completed → refresh views ----
+      eventBus.on("timer:completed", () => {
+        // Views will auto-update via their own bus listeners
+      });
+    });
   </script>
 </body>
 </html>
-
