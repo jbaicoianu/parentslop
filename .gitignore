@@ -1,0 +1,5 @@
+node_modules/
+parentslop.db
+parentslop.db-shm
+parentslop.db-wal
+session.json

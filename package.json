@@ -1,0 +1,11 @@
+{
+  "name": "parentslop",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "better-sqlite3": "^11.7.0"
+  }
+}
