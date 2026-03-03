@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Color by Numbers — Canvas</title>
+  <link rel="stylesheet" href="library.css">
+  <style>
+    html, body { height: 100%; margin: 0; background: #181a1b; color: #e8e6e3; }
+    body { overflow: hidden; }
+    body.library-open { overflow: auto; }
+    canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+    library-screen { display: none; }
+    /* Optional: drag-and-drop hint (in-canvas UI handles the rest) */
+  </style>
+</head>
+<body>
+<library-screen id="library"></library-screen>
+<canvas id="app"></canvas>
+<script src="tap-color.js"></script>
+<script>
+
+/****************
+ * Sample SVG   *
+ ****************/
+const SAMPLES = {
+  // Simple flower with petals as regions; data-index drives palette entries
+  flower: `<?xml version="1.0" encoding="UTF-8"?>
+  <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 400' data-outline-color='#0b0d0e' data-outline-width='2'>
+    <rect x='0' y='0' width='400' height='400' fill='none'/>
+    <circle cx='200' cy='200' r='40' data-index='1' data-color='#facc15' />
+    <path d='M200 90 C 220 110, 230 140, 200 150 C 170 140, 180 110, 200 90 Z' data-index='2' data-color='#f472b6' />
+    <path d='M200 310 C 220 290, 230 260, 200 250 C 170 260, 180 290, 200 310 Z' data-index='2' data-color='#f472b6' />
+    <path d='M90 200 C 110 180, 140 170, 150 200 C 140 230, 110 220, 90 200 Z' data-index='2' data-color='#f472b6' />
+    <path d='M310 200 C 290 180, 260 170, 250 200 C 260 230, 290 220, 310 200 Z' data-index='2' data-color='#f472b6' />
+    <path d='M120 120 C 140 130, 160 150, 150 160 C 140 170, 120 160, 110 140 C 110 130, 115 120, 120 120 Z' data-index='3' data-color='#60a5fa' />
+    <path d='M280 120 C 260 130, 240 150, 250 160 C 260 170, 280 160, 290 140 C 290 130, 285 120, 280 120 Z' data-index='3' data-color='#60a5fa' />
+    <path d='M120 280 C 140 270, 160 250, 150 240 C 140 230, 120 240, 110 260 C 110 270, 115 280, 120 280 Z' data-index='3' data-color='#60a5fa' />
+    <path d='M280 280 C 260 270, 240 250, 250 240 C 260 230, 280 240, 290 260 C 290 270, 285 280, 280 280 Z' data-index='3' data-color='#60a5fa' />
+    <ellipse cx='200' cy='330' rx='25' ry='10' data-index='4' data-color='#34d399' />
+  </svg>`
+};
+
+</script>
+</body>
+</html>
+

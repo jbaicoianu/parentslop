@@ -1,0 +1,512 @@
+/* Library Screen */
+library-screen {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  background: #181a1b;
+  color: #e8e6e3;
+  overflow-y: auto;
+  padding: 2rem;
+  box-sizing: border-box;
+}
+
+library-screen .library-header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+library-screen .library-header h1 {
+  margin: 0 0 0.5rem 0;
+  font-size: 2rem;
+  font-weight: 600;
+}
+
+library-screen .library-header p {
+  margin: 0;
+  opacity: 0.7;
+}
+
+library-screen .library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1.5rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+library-screen .library-item {
+  position: relative;
+  background: #202324;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+library-screen .library-item:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+}
+
+library-screen .library-item-thumbnail {
+  width: 100%;
+  aspect-ratio: 1;
+  background: #2a2d2e;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+library-screen .library-item-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+library-screen .library-item-name {
+  padding: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+library-screen .library-item-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  background: rgba(0,0,0,0.7);
+  border: none;
+  border-radius: 50%;
+  color: white;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+library-screen .library-item:hover .library-item-delete {
+  opacity: 1;
+}
+
+library-screen .library-item-delete:hover {
+  background: rgba(255,0,0,0.8);
+}
+
+library-screen .library-add-new {
+  background: #2a2d2e;
+  border: 2px dashed #444;
+}
+
+library-screen .library-add-new:hover {
+  border-color: #60a5fa;
+}
+
+library-screen .library-add-icon {
+  font-size: 4rem;
+  opacity: 0.5;
+  text-align: center;
+  padding: 2rem 0 1rem;
+}
+
+library-screen .library-add-text {
+  text-align: center;
+  padding: 0 1rem 2rem;
+  opacity: 0.7;
+}
+
+library-screen.drag-over {
+  background: #1a2030;
+}
+
+library-screen.drag-over .library-grid::after {
+  content: 'Drop image here';
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 2rem;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Difficulty Modal */
+difficulty-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0,0,0,0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+difficulty-modal .difficulty-content {
+  background: #202324;
+  color: #e8e6e3;
+  border-radius: 12px;
+  padding: 2rem;
+  max-width: 500px;
+  width: 90%;
+}
+
+difficulty-modal .difficulty-content h2 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.5rem;
+}
+
+difficulty-modal .difficulty-image-name {
+  margin: 0 0 1.5rem 0;
+  opacity: 0.7;
+}
+
+difficulty-modal .difficulty-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+difficulty-modal .difficulty-btn {
+  background: #2a2d2e;
+  border: 2px solid #444;
+  color: #e8e6e3;
+  padding: 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s;
+}
+
+difficulty-modal .difficulty-btn:hover {
+  border-color: #60a5fa;
+  background: #2f3335;
+}
+
+difficulty-modal .difficulty-btn-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+difficulty-modal .difficulty-btn-desc {
+  font-size: 0.9rem;
+  opacity: 0.7;
+}
+
+difficulty-modal .difficulty-cancel {
+  width: 100%;
+  padding: 0.75rem;
+  background: transparent;
+  border: 1px solid #444;
+  color: #e8e6e3;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+difficulty-modal .difficulty-cancel:hover {
+  background: #2a2d2e;
+}
+
+/* Name Prompt Modal */
+name-prompt-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0,0,0,0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+name-prompt-modal .name-prompt-content {
+  background: #202324;
+  color: #e8e6e3;
+  border-radius: 12px;
+  padding: 2rem;
+  max-width: 400px;
+  width: 90%;
+}
+
+name-prompt-modal .name-prompt-content h2 {
+  margin: 0 0 1.5rem 0;
+}
+
+name-prompt-modal .name-input {
+  width: 100%;
+  padding: 0.75rem;
+  background: #2a2d2e;
+  border: 2px solid #444;
+  color: #e8e6e3;
+  border-radius: 8px;
+  font-size: 1rem;
+  margin-bottom: 1.5rem;
+  box-sizing: border-box;
+}
+
+name-prompt-modal .name-input:focus {
+  outline: none;
+  border-color: #60a5fa;
+}
+
+name-prompt-modal .name-prompt-buttons {
+  display: flex;
+  gap: 0.75rem;
+}
+
+name-prompt-modal .name-prompt-buttons button {
+  flex: 1;
+  padding: 0.75rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: all 0.2s;
+}
+
+name-prompt-modal .name-btn-cancel {
+  background: transparent;
+  border: 1px solid #444;
+  color: #e8e6e3;
+}
+
+name-prompt-modal .name-btn-cancel:hover {
+  background: #2a2d2e;
+}
+
+name-prompt-modal .name-btn-ok {
+  background: #60a5fa;
+  border: none;
+  color: white;
+}
+
+name-prompt-modal .name-btn-ok:hover {
+  background: #4a95ea;
+}
+
+/* Image Config Modal */
+image-config-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0,0,0,0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+image-config-modal .image-config-content {
+  background: #202324;
+  color: #e8e6e3;
+  border-radius: 12px;
+  padding: 2rem;
+  max-width: 600px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+image-config-modal .image-config-content h2 {
+  margin: 0 0 1.5rem 0;
+}
+
+image-config-modal .config-section {
+  margin-bottom: 1.5rem;
+}
+
+image-config-modal .config-section label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
+image-config-modal .name-input,
+image-config-modal .processor-select,
+image-config-modal .difficulty-select {
+  width: 100%;
+  padding: 0.75rem;
+  background: #2a2d2e;
+  border: 2px solid #444;
+  color: #e8e6e3;
+  border-radius: 8px;
+  font-size: 1rem;
+  box-sizing: border-box;
+}
+
+image-config-modal .name-input:focus,
+image-config-modal select:focus {
+  outline: none;
+  border-color: #60a5fa;
+}
+
+image-config-modal .preview-section {
+  margin-top: 2rem;
+}
+
+image-config-modal .preview-container {
+  width: 100%;
+  min-height: 300px;
+  background: #2a2d2e;
+  border: 2px solid #444;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+image-config-modal .preview-spinner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+image-config-modal .preview-spinner .spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid #444;
+  border-top-color: #60a5fa;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+image-config-modal .preview-status {
+  margin: 0;
+  opacity: 0.7;
+  font-size: 0.9rem;
+}
+
+image-config-modal .preview-canvas {
+  max-width: 100%;
+  max-height: 400px;
+  width: auto;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+image-config-modal .config-buttons {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+image-config-modal .config-buttons button {
+  flex: 1;
+  padding: 0.75rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: all 0.2s;
+}
+
+image-config-modal .config-btn-cancel {
+  background: transparent;
+  border: 1px solid #444;
+  color: #e8e6e3;
+}
+
+image-config-modal .config-btn-cancel:hover {
+  background: #2a2d2e;
+}
+
+image-config-modal .config-btn-ok {
+  background: #60a5fa;
+  border: none;
+  color: white;
+}
+
+image-config-modal .config-btn-ok:hover {
+  background: #4a95ea;
+}
+
+image-config-modal .config-btn-ok:disabled {
+  background: #4a4a4a;
+  color: #888;
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+image-config-modal .config-btn-ok:disabled:hover {
+  background: #4a4a4a;
+}
+
+image-config-modal .config-btn-process {
+  width: 100%;
+  padding: 0.75rem;
+  background: #60a5fa;
+  border: none;
+  color: white;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+image-config-modal .config-btn-process:hover {
+  background: #4a95ea;
+}
+
+/* Processing Modal */
+processing-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0,0,0,0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+processing-modal .processing-content {
+  background: #202324;
+  color: #e8e6e3;
+  border-radius: 12px;
+  padding: 2rem;
+  max-width: 400px;
+  width: 90%;
+  text-align: center;
+}
+
+processing-modal .processing-content h2 {
+  margin: 0 0 1rem 0;
+}
+
+processing-modal .processing-status {
+  margin: 0 0 1.5rem 0;
+  opacity: 0.7;
+  min-height: 1.5em;
+}
+
+processing-modal .processing-spinner {
+  width: 40px;
+  height: 40px;
+  margin: 0 auto;
+  border: 4px solid #444;
+  border-top-color: #60a5fa;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
