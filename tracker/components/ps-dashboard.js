@@ -8,6 +8,8 @@ class PsDashboard extends HTMLElement {
     this._timerInterval = null;
     this._openMenuId = null;
     this._penaltyPickerOpen = false;
+    this._showAllEarnings = false;
+    this._showAllPenalties = false;
   }
 
   connectedCallback() {
@@ -37,6 +39,16 @@ class PsDashboard extends HTMLElement {
 
     const allTasks = tracker.getTasksForUser(user.id);
     const currencies = trackerStore.currencies.data;
+
+    // --- Pending rewards by user ---
+    const pendingByUser = {};
+    for (const c of trackerStore.completions.data) {
+      if (c.status !== "pending" || !c.rewards) continue;
+      if (!pendingByUser[c.userId]) pendingByUser[c.userId] = {};
+      for (const [currId, amt] of Object.entries(c.rewards)) {
+        pendingByUser[c.userId][currId] = (pendingByUser[c.userId][currId] || 0) + amt;
+      }
+    }
 
     // --- Admin overview data ---
     let adminKids = [];
@@ -94,13 +106,21 @@ class PsDashboard extends HTMLElement {
       }
     }
 
-    // --- Pending rewards for current user ---
-    const pendingByUser = {};
-    for (const c of trackerStore.completions.data) {
-      if (c.status !== "pending" || !c.rewards) continue;
-      if (!pendingByUser[c.userId]) pendingByUser[c.userId] = {};
-      for (const [currId, amt] of Object.entries(c.rewards)) {
-        pendingByUser[c.userId][currId] = (pendingByUser[c.userId][currId] || 0) + amt;
+    // --- Unseen earnings notification ---
+    let _earningsSeenCutoff = null;
+    if (!user.isAdmin) {
+      if (!user.lastEarningsSeenAt) {
+        user.lastEarningsSeenAt = tracker.now();
+        trackerStore.users.save();
+      } else {
+        _earningsSeenCutoff = user.lastEarningsSeenAt;
+        const unseenEarnings = trackerStore.completions.data.filter(
+          (c) => c.userId === user.id && !c.isPenalty && c.status === "approved" && (c.approvedAt || c.completedAt) > _earningsSeenCutoff
+        ).length;
+        if (unseenEarnings > 0) {
+          user.lastEarningsSeenAt = tracker.now();
+          trackerStore.users.save();
+        }
       }
     }
 
@@ -166,12 +186,34 @@ class PsDashboard extends HTMLElement {
     // Penalties
     const penalties = tracker.getRecentPenalties(user.id, 7);
     let _unseenIdx = 0;
-    const penaltyDetails = penalties.map((p) => {
+    const penaltyLimit = this._showAllPenalties ? penalties.length : 5;
+    const penaltyDetails = penalties.slice(0, penaltyLimit).map((p) => {
       const task = trackerStore.tasks.data.find((t) => t.id === p.taskId);
       const isNew = _penaltySeenCutoff && p.completedAt > _penaltySeenCutoff;
       const unseenOrder = isNew ? _unseenIdx++ : 0;
       return { ...p, taskName: task?.name || "Unknown", isNew, unseenOrder };
     });
+
+    // Recent earnings (last 7 days, approved non-penalty completions)
+    const earningsCutoff = new Date();
+    earningsCutoff.setDate(earningsCutoff.getDate() - 7);
+    const earningsCutoffISO = earningsCutoff.toISOString();
+    const allRecentEarnings = trackerStore.completions.data
+      .filter((c) => c.userId === user.id && !c.isPenalty && c.status === "approved" && (c.approvedAt || c.completedAt) >= earningsCutoffISO)
+      .sort((a, b) => (b.approvedAt || b.completedAt).localeCompare(a.approvedAt || a.completedAt));
+    const earningsLimit = this._showAllEarnings ? allRecentEarnings.length : 5;
+    const recentEarnings = allRecentEarnings
+      .slice(0, earningsLimit)
+      .map((c) => {
+        const task = trackerStore.tasks.data.find((t) => t.id === c.taskId);
+        const earningTs = c.approvedAt || c.completedAt;
+        const isNew = _earningsSeenCutoff && earningTs > _earningsSeenCutoff;
+        const rewardText = Object.entries(c.rewards || {})
+          .filter(([, amt]) => amt > 0)
+          .map(([cid, amt]) => "+" + tracker.formatAmount(amt, cid))
+          .join(", ");
+        return { ...c, taskName: task?.name || "Unknown", isNew, rewardText, earningTs };
+      });
 
     // Streaks
     const streaks = allTasks
@@ -416,6 +458,87 @@ class PsDashboard extends HTMLElement {
         @keyframes badgePulse {
           0%, 100% { opacity: 1; transform: scale(1); }
           50% { opacity: 0.7; transform: scale(1.15); }
+        }
+
+        /* Activity columns (penalties + earnings side by side) */
+        .activity-columns {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          gap: 12px;
+          margin-bottom: 18px;
+        }
+        .activity-columns > .penalty-section,
+        .activity-columns > .earnings-section {
+          margin-bottom: 0;
+        }
+
+        /* Earnings section */
+        .earnings-section {
+          border-radius: var(--radius-lg);
+          padding: 14px 16px;
+          background: linear-gradient(145deg, #152a1a, #0e180f);
+          border: 1px solid rgba(80, 250, 123, 0.12);
+          margin-bottom: 18px;
+        }
+        .earnings-title {
+          font-size: 0.85rem;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          color: var(--success);
+          margin-bottom: 10px;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .earnings-row {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 8px 0;
+          font-size: 0.82rem;
+          border-bottom: 1px solid rgba(80, 250, 123, 0.06);
+        }
+        .earnings-row:last-child { border-bottom: none; }
+        .earnings-name { flex: 1; color: var(--text); }
+        .earnings-time { color: var(--muted); font-size: 0.72rem; }
+        .earnings-amount { color: var(--success); font-weight: 600; font-size: 0.82rem; }
+        .earnings-row.earnings-unseen {
+          animation: earningsGlow 800ms ease-out both;
+          background: rgba(80, 250, 123, 0.1);
+          border-radius: var(--radius-sm);
+          padding: 8px 8px;
+          border-left: 3px solid var(--success);
+        }
+        .earnings-new-badge {
+          font-size: 0.6rem;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          color: #fff;
+          background: var(--success);
+          padding: 2px 6px;
+          border-radius: 999px;
+          flex-shrink: 0;
+          animation: badgePulse 1.5s ease-in-out 0.8s 3;
+        }
+        .view-more-link {
+          display: block;
+          text-align: center;
+          font-size: 0.74rem;
+          color: var(--muted);
+          cursor: pointer;
+          padding: 6px 0 2px;
+          opacity: 0.8;
+          transition: opacity 160ms, color 160ms;
+        }
+        .view-more-link:hover {
+          opacity: 1;
+          color: var(--accent);
+        }
+        @keyframes earningsGlow {
+          0% { opacity: 0; transform: translateX(-20px); background: rgba(80, 250, 123, 0.25); }
+          50% { opacity: 1; transform: translateX(3px); }
+          100% { transform: translateX(0); background: rgba(80, 250, 123, 0.1); }
         }
 
         /* Task rows */
@@ -1016,23 +1139,42 @@ class PsDashboard extends HTMLElement {
           </div>
         </div>
 
-        <!-- B. Penalties — "Watch Out!" -->
-        ${penaltyDetails.length > 0 ? `
-          <div class="penalty-section">
-            <div class="penalty-title">Watch Out!</div>
-            ${penaltyDetails.map((p) => {
-              const deduction = Object.entries(p.rewards || {})
-                .map(([cid, amt]) => tracker.formatAmount(amt, cid))
-                .join(", ");
-              return `
-                <div class="penalty-row${p.isNew ? " penalty-unseen" : ""}"${p.isNew ? ` style="animation-delay: ${p.unseenOrder * 200}ms"` : ""}>
-                  ${p.isNew ? `<span class="penalty-new-badge">NEW</span>` : ""}
-                  <span class="penalty-name">${p.taskName}</span>
-                  <span class="penalty-time">${timeAgo(p.completedAt)}</span>
-                  <span class="penalty-amount">${deduction}</span>
-                </div>
-              `;
-            }).join("")}
+        <!-- B. Earnings & Penalties -->
+        ${penaltyDetails.length > 0 || recentEarnings.length > 0 ? `
+          <div class="activity-columns">
+            ${recentEarnings.length > 0 ? `
+              <div class="earnings-section">
+                <div class="earnings-title">Recent Earnings</div>
+                ${recentEarnings.map((e) => `
+                  <div class="earnings-row${e.isNew ? " earnings-unseen" : ""}">
+                    ${e.isNew ? '<span class="earnings-new-badge">NEW</span>' : ""}
+                    <span class="earnings-name">${e.taskName}</span>
+                    <span class="earnings-time">${timeAgo(e.earningTs)}</span>
+                    <span class="earnings-amount">${e.rewardText}</span>
+                  </div>
+                `).join("")}
+                ${allRecentEarnings.length > 5 ? `<a class="view-more-link" id="toggle-earnings">${this._showAllEarnings ? "Show less" : `View all ${allRecentEarnings.length} earnings`}</a>` : ""}
+              </div>
+            ` : ""}
+            ${penaltyDetails.length > 0 ? `
+              <div class="penalty-section">
+                <div class="penalty-title">Watch Out!</div>
+                ${penaltyDetails.map((p) => {
+                  const deduction = Object.entries(p.rewards || {})
+                    .map(([cid, amt]) => tracker.formatAmount(amt, cid))
+                    .join(", ");
+                  return `
+                    <div class="penalty-row${p.isNew ? " penalty-unseen" : ""}"${p.isNew ? ` style="animation-delay: ${p.unseenOrder * 200}ms"` : ""}>
+                      ${p.isNew ? `<span class="penalty-new-badge">NEW</span>` : ""}
+                      <span class="penalty-name">${p.taskName}</span>
+                      <span class="penalty-time">${timeAgo(p.completedAt)}</span>
+                      <span class="penalty-amount">${deduction}</span>
+                    </div>
+                  `;
+                }).join("")}
+                ${penalties.length > 5 ? `<a class="view-more-link" id="toggle-penalties">${this._showAllPenalties ? "Show less" : `View all ${penalties.length} penalties`}</a>` : ""}
+              </div>
+            ` : ""}
           </div>
         ` : ""}
 
@@ -1096,23 +1238,6 @@ class PsDashboard extends HTMLElement {
         ${myJobs.length > 0 ? `
           <div class="section-title section-gap"><span class="section-icon">&#x1F4BC;</span> My Jobs</div>
           ${myJobsHtml}
-        ` : ""}
-
-        <!-- E. Recently Completed (today) -->
-        ${todayCompletions.length > 0 ? `
-          <div class="section-title section-gap">Recently Completed</div>
-          ${todayCompletions.map((x) => {
-            const earnedText = Object.entries(x.completion.rewards || {})
-              .map(([cid, amt]) => tracker.formatAmount(amt, cid))
-              .join(", ");
-            return `
-              <div class="completed-row">
-                <span class="completed-check">&#x2714;</span>
-                <span class="completed-name">${x.task.name}</span>
-                <span class="completed-reward">+${earnedText}</span>
-              </div>
-            `;
-          }).join("")}
         ` : ""}
 
         <!-- F. Active Streaks -->
@@ -1238,6 +1363,16 @@ class PsDashboard extends HTMLElement {
         });
       }, 1000);
     }
+
+    // --- View more toggles ---
+    this.shadowRoot.getElementById("toggle-earnings")?.addEventListener("click", () => {
+      this._showAllEarnings = !this._showAllEarnings;
+      this.render();
+    });
+    this.shadowRoot.getElementById("toggle-penalties")?.addEventListener("click", () => {
+      this._showAllPenalties = !this._showAllPenalties;
+      this.render();
+    });
 
     // --- Admin overview event handlers ---
     if (user.isAdmin) {
