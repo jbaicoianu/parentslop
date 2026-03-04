@@ -153,8 +153,8 @@ class PsAdminTasks extends HTMLElement {
   }
 
   _applyPenalty(taskId) {
-    const users = trackerStore.users.data.filter((u) => !u.isAdmin);
-    if (users.length === 0) { alert("No non-admin users."); return; }
+    const users = trackerStore.users.data;
+    if (users.length === 0) { alert("No users."); return; }
 
     const names = users.map((u, i) => `${i + 1}. ${u.name}`).join("\n");
     const choice = prompt(`Apply penalty to which user?\n${names}\n\nEnter number:`);

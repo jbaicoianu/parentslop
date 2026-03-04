@@ -43,7 +43,7 @@ class PsDashboard extends HTMLElement {
     let penaltyTasks = [];
     if (user.isAdmin) {
       penaltyTasks = trackerStore.tasks.data.filter((t) => !t.archived && t.isPenalty);
-      const allUsers = trackerStore.users.data.filter((u) => !u.isAdmin);
+      const allUsers = trackerStore.users.data;
       adminKids = allUsers.map((kid) => {
         const kidTasks = tracker.getTasksForUser(kid.id);
         const dailyTasks = kidTasks.filter((t) => t.recurrence === "daily" && t.category !== "jobboard");
@@ -60,7 +60,12 @@ class PsDashboard extends HTMLElement {
           currencyName: c.name,
         }));
         const recentPenaltyCount = tracker.getRecentPenalties(kid.id, 7).length;
-        return { ...kid, dailyDone, dailyTotal, activeJobs, balances, recentPenaltyCount };
+        const pendingRewards = pendingByUser[kid.id] || {};
+        const pendingText = Object.entries(pendingRewards)
+          .filter(([, amt]) => amt > 0)
+          .map(([cid, amt]) => "+" + tracker.formatAmount(amt, cid))
+          .join(", ");
+        return { ...kid, dailyDone, dailyTotal, activeJobs, balances, recentPenaltyCount, pendingText };
       });
     }
 
@@ -86,6 +91,16 @@ class PsDashboard extends HTMLElement {
             }, i * 900);
           }
         }
+      }
+    }
+
+    // --- Pending rewards for current user ---
+    const pendingByUser = {};
+    for (const c of trackerStore.completions.data) {
+      if (c.status !== "pending" || !c.rewards) continue;
+      if (!pendingByUser[c.userId]) pendingByUser[c.userId] = {};
+      for (const [currId, amt] of Object.entries(c.rewards)) {
+        pendingByUser[c.userId][currId] = (pendingByUser[c.userId][currId] || 0) + amt;
       }
     }
 
@@ -310,6 +325,12 @@ class PsDashboard extends HTMLElement {
           font-size: 0.72rem;
           color: var(--muted);
           margin-top: 2px;
+        }
+        .stat-pending {
+          font-size: 0.7rem;
+          color: var(--warning);
+          margin-top: 2px;
+          opacity: 0.9;
         }
 
         /* Penalty card */
@@ -845,6 +866,11 @@ class PsDashboard extends HTMLElement {
           gap: 8px;
           flex-wrap: wrap;
         }
+        .kid-pending-note {
+          font-size: 0.72rem;
+          color: var(--warning);
+          margin-top: 2px;
+        }
         .kid-penalties-note {
           font-size: 0.72rem;
           color: var(--danger);
@@ -946,6 +972,7 @@ class PsDashboard extends HTMLElement {
                     <div class="kid-balances">
                       ${kid.balances.map((b) => `<span>${b.formatted}</span>`).join(" · ")}
                     </div>
+                    ${kid.pendingText ? `<div class="kid-pending-note">${kid.pendingText} pending</div>` : ""}
                     ${kid.recentPenaltyCount > 0 ? `
                       <div class="kid-penalties-note">${kid.recentPenaltyCount} penalt${kid.recentPenaltyCount === 1 ? "y" : "ies"} this week</div>
                     ` : ""}
@@ -974,12 +1001,15 @@ class PsDashboard extends HTMLElement {
 
         <!-- A. Quick Stats -->
         <div class="quick-stats">
-          ${currencies.map((c) => `
+          ${currencies.map((c) => {
+            const pending = pendingByUser[user.id]?.[c.id] || 0;
+            return `
             <div class="stat-card">
               <div class="stat-value">${tracker.formatAmount(tracker.getBalance(user.id, c.id), c.id)}</div>
               <div class="stat-label">${c.name}</div>
+              ${pending > 0 ? `<div class="stat-pending">+${tracker.formatAmount(pending, c.id)} pending</div>` : ""}
             </div>
-          `).join("")}
+          `; }).join("")}
           <div class="stat-card">
             <div class="stat-value">${routineTasks.length}</div>
             <div class="stat-label">Tasks remaining</div>
