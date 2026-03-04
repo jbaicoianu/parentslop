@@ -116,6 +116,43 @@ class PsAdminApprovals extends HTMLElement {
           letter-spacing: 0.04em;
           margin: 16px 0 8px;
         }
+        .criteria-section {
+          margin: 8px 0 4px;
+          padding: 8px 10px;
+          border-radius: var(--radius-sm);
+          background: rgba(102, 217, 239, 0.04);
+          border: 1px solid rgba(102, 217, 239, 0.1);
+        }
+        .criteria-section-label {
+          font-size: 0.7rem;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          margin-bottom: 6px;
+        }
+        .criterion-check {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          margin-bottom: 4px;
+          font-size: 0.8rem;
+          color: var(--text);
+        }
+        .criterion-check input[type="checkbox"] {
+          accent-color: var(--accent);
+          width: 16px;
+          height: 16px;
+        }
+        .criterion-check .criterion-mult {
+          color: var(--muted);
+          font-size: 0.72rem;
+        }
+        .adjusted-payout {
+          font-size: 0.76rem;
+          color: var(--accent);
+          margin-top: 6px;
+          font-weight: 500;
+        }
       </style>
       <div class="panel">
         <div class="panel-title">Approvals</div>
@@ -152,13 +189,25 @@ class PsAdminApprovals extends HTMLElement {
                     ${c.timerSeconds !== null && !c.isHourly ? " · " + Math.round(c.timerSeconds) + "s" : ""}
                     ${c.streakCount > 0 ? " · streak " + c.streakCount : ""}
                   </div>
-                  <div class="pending-rewards">Payout: ${rewardText || "none"}</div>
+                  <div class="pending-rewards" data-base-rewards='${JSON.stringify(c.rewards || {})}' data-completion-id="${c.id}">Payout: ${rewardText || "none"}</div>
                 </div>
                 <div class="action-btns">
                   <button class="action-btn approve-btn" data-approve="${c.id}">Approve</button>
                   <button class="action-btn reject-btn" data-reject="${c.id}">Reject</button>
                 </div>
               </div>
+              ${task?.bonusCriteria?.length > 0 ? `
+                <div class="criteria-section" data-criteria-for="${c.id}">
+                  <div class="criteria-section-label">Bonus Criteria</div>
+                  ${task.bonusCriteria.map((bc) => `
+                    <label class="criterion-check">
+                      <input type="checkbox" data-criterion-id="${bc.id}" data-multiplier="${bc.multiplier}" />
+                      ${bc.label} <span class="criterion-mult">(${bc.multiplier}×)</span>
+                    </label>
+                  `).join("")}
+                  <div class="adjusted-payout" data-adjusted-for="${c.id}"></div>
+                </div>
+              ` : ""}
               ${c.isHourly && c.worklog && c.worklog.length > 0 ? `
                 <table class="invoice-table">
                   <thead>
@@ -199,7 +248,15 @@ class PsAdminApprovals extends HTMLElement {
 
     this.shadowRoot.querySelectorAll("[data-approve]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        tracker.approveCompletion(btn.dataset.approve);
+        const completionId = btn.dataset.approve;
+        const criteriaSection = this.shadowRoot.querySelector(`[data-criteria-for="${completionId}"]`);
+        const checkedIds = [];
+        if (criteriaSection) {
+          criteriaSection.querySelectorAll('input[type="checkbox"]:checked').forEach((cb) => {
+            checkedIds.push(cb.dataset.criterionId);
+          });
+        }
+        tracker.approveCompletion(completionId, checkedIds);
         if (typeof slopSFX !== "undefined") slopSFX.cashJingle();
         eventBus.emit("toast:show", { message: "Approved!", type: "success" });
       });
@@ -212,6 +269,39 @@ class PsAdminApprovals extends HTMLElement {
           eventBus.emit("toast:show", { message: "Rejected.", type: "danger" });
         }
       });
+    });
+
+    // Live payout update when toggling bonus criteria checkboxes
+    this.shadowRoot.querySelectorAll(".criteria-section").forEach((section) => {
+      const completionId = section.dataset.criteriaFor;
+      const payoutEl = section.querySelector(`[data-adjusted-for="${completionId}"]`);
+      const rewardsEl = this.shadowRoot.querySelector(`.pending-rewards[data-completion-id="${completionId}"]`);
+      if (!payoutEl || !rewardsEl) return;
+
+      const baseRewards = JSON.parse(rewardsEl.dataset.baseRewards);
+      const checkboxes = section.querySelectorAll('input[type="checkbox"]');
+
+      const updatePayout = () => {
+        let multiplier = 1;
+        checkboxes.forEach((cb) => {
+          if (cb.checked) multiplier *= parseFloat(cb.dataset.multiplier);
+        });
+        if (multiplier === 1) {
+          payoutEl.textContent = "";
+        } else {
+          const adjusted = Object.entries(baseRewards)
+            .map(([cid, amt]) => {
+              const c = tracker.getCurrency(cid);
+              const decimals = c ? (c.decimals || 0) : 0;
+              const factor = Math.pow(10, decimals);
+              return tracker.formatAmount(Math.round(amt * multiplier * factor) / factor, cid);
+            })
+            .join(", ");
+          payoutEl.textContent = `Adjusted payout: ${adjusted}`;
+        }
+      };
+
+      checkboxes.forEach((cb) => cb.addEventListener("change", updatePayout));
     });
   }
 }

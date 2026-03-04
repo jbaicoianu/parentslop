@@ -318,9 +318,32 @@ function completeTask(taskId, userId, timerSeconds = null) {
   return completion;
 }
 
-function approveCompletion(completionId) {
+function approveCompletion(completionId, checkedCriteria = []) {
   const c = completionStore.data.find((x) => x.id === completionId);
   if (!c || c.status !== "pending") return;
+
+  // Apply bonus criteria multipliers if any were checked
+  const task = taskStore.data.find((t) => t.id === c.taskId);
+  let criteriaMultiplier = 1;
+  if (task?.bonusCriteria?.length > 0 && checkedCriteria.length > 0) {
+    for (const criterion of task.bonusCriteria) {
+      if (checkedCriteria.includes(criterion.id)) {
+        criteriaMultiplier *= criterion.multiplier;
+      }
+    }
+    // Adjust rewards by criteria multiplier
+    if (criteriaMultiplier !== 1 && c.rewards) {
+      for (const [currId, baseAmount] of Object.entries(c.rewards)) {
+        const curr = getCurrency(currId);
+        const decimals = curr ? (curr.decimals || 0) : 0;
+        const factor = Math.pow(10, decimals);
+        c.rewards[currId] = Math.round(baseAmount * criteriaMultiplier * factor) / factor;
+      }
+    }
+  }
+
+  c.bonusCriteriaChecked = checkedCriteria.length > 0 ? checkedCriteria : null;
+  c.bonusCriteriaMultiplier = criteriaMultiplier !== 1 ? criteriaMultiplier : null;
   c.status = "approved";
   c.approvedAt = now();
   completionStore.save();
@@ -438,6 +461,7 @@ function createTask(data) {
     rewards: data.rewards || {}, // { currencyId: amount }
     streakBonus: data.streakBonus || null, // { threshold, multiplier }
     timerBonus: data.timerBonus || null, // { targetSeconds, multiplier }
+    bonusCriteria: data.bonusCriteria || null, // [{ id, label, multiplier }]
     category: data.category || "routine", // "routine" | "jobboard"
     payType: data.payType || "fixed", // "fixed" | "hourly"
     multiUser: data.multiUser ?? true, // whether multiple kids can accept

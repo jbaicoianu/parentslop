@@ -77,6 +77,7 @@ class PsAdminTasks extends HTMLElement {
                   ${t.requiresApproval ? "· approval required" : ""}
                   ${t.streakBonus ? `· streak ${t.streakBonus.threshold}d=${t.streakBonus.multiplier}x` : ""}
                   ${t.timerBonus ? `· timer ${t.timerBonus.mode === "over" ? "≥" : "<"}${t.timerBonus.targetSeconds}s=${t.timerBonus.multiplier}x` : ""}
+                  ${t.bonusCriteria?.length ? `· ${t.bonusCriteria.length} bonus criteria` : ""}
                 </div>
               </div>
               <button class="btn btn-sm btn-ghost" data-edit="${t.id}">Edit</button>
@@ -187,6 +188,7 @@ class PsAdminTasks extends HTMLElement {
     const timerMode = task?.timerBonus?.mode || "under";
     const timerTickSound = task?.timerBonus?.tickSound || "click";
     const timerHitSound = task?.timerBonus?.hitSound || "success";
+    const bonusCriteria = task?.bonusCriteria || [];
     const assignedUsers = task?.assignedUsers || [];
     const category = task?.category || "routine";
     const payType = task?.payType || "fixed";
@@ -248,6 +250,45 @@ class PsAdminTasks extends HTMLElement {
         .user-check { display: flex; align-items: center; gap: 4px; }
         .user-check label { font-size: 0.8rem; color: var(--muted); cursor: pointer; }
         .user-check input { accent-color: var(--accent); }
+        .bonus-criterion-row {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          margin-bottom: 6px;
+        }
+        .bonus-criterion-row input[type="text"] {
+          flex: 1;
+          background: #0d0e16;
+          border: 1px solid var(--border-subtle);
+          border-radius: var(--radius-sm);
+          padding: 6px 10px;
+          font-size: 0.84rem;
+          color: var(--text);
+          font-family: inherit;
+        }
+        .bonus-criterion-row input[type="number"] {
+          width: 80px;
+          background: #0d0e16;
+          border: 1px solid var(--border-subtle);
+          border-radius: var(--radius-sm);
+          padding: 6px 10px;
+          font-size: 0.84rem;
+          color: var(--text);
+          font-family: inherit;
+        }
+        .bonus-criterion-row .remove-criterion {
+          appearance: none;
+          border: none;
+          background: transparent;
+          color: var(--danger);
+          cursor: pointer;
+          font-size: 1.1rem;
+          padding: 2px 6px;
+          border-radius: 4px;
+        }
+        .bonus-criterion-row .remove-criterion:hover {
+          background: rgba(255, 107, 129, 0.15);
+        }
       </style>
       <div class="panel">
         <h3>${isNew ? (isPenalty ? "New Penalty" : "New Task") : "Edit " + (isPenalty ? "Penalty" : "Task")}</h3>
@@ -378,6 +419,19 @@ class PsAdminTasks extends HTMLElement {
             </div>
           </div>
 
+          <div class="section-label">Bonus Criteria (optional)</div>
+          <div id="bonus-criteria-list">
+            ${bonusCriteria.map((bc) => `
+              <div class="bonus-criterion-row" data-criterion-id="${bc.id}">
+                <input type="text" class="criterion-label" value="${bc.label}" placeholder="e.g. Without reminding" />
+                <input type="number" class="criterion-multiplier" value="${bc.multiplier}" placeholder="1.25" step="0.05" min="1" />
+                <span style="font-size:0.72rem;color:var(--muted)">×</span>
+                <button class="remove-criterion" type="button">×</button>
+              </div>
+            `).join("")}
+          </div>
+          <button class="btn btn-sm btn-ghost mt-2" id="add-criterion" type="button">+ Add criterion</button>
+
           <div class="section-label">Assign to users (empty = all)</div>
           <div class="user-checkboxes">
             ${users.filter(u => !u.isAdmin).map((u) => `
@@ -433,6 +487,29 @@ class PsAdminTasks extends HTMLElement {
       });
       updateRewardsLabel();
     }
+
+    // Bonus criteria: add / remove
+    const criteriaList = this.shadowRoot.getElementById("bonus-criteria-list");
+    const addCriterionBtn = this.shadowRoot.getElementById("add-criterion");
+    if (addCriterionBtn && criteriaList) {
+      addCriterionBtn.addEventListener("click", () => {
+        const row = document.createElement("div");
+        row.className = "bonus-criterion-row";
+        row.innerHTML = `
+          <input type="text" class="criterion-label" value="" placeholder="e.g. Without reminding" />
+          <input type="number" class="criterion-multiplier" value="1.25" placeholder="1.25" step="0.05" min="1" />
+          <span style="font-size:0.72rem;color:var(--muted)">×</span>
+          <button class="remove-criterion" type="button">×</button>
+        `;
+        row.querySelector(".remove-criterion").addEventListener("click", () => row.remove());
+        criteriaList.appendChild(row);
+      });
+    }
+    if (criteriaList) {
+      criteriaList.querySelectorAll(".remove-criterion").forEach((btn) => {
+        btn.addEventListener("click", () => btn.closest(".bonus-criterion-row").remove());
+      });
+    }
   }
 
   _saveForm(isPenalty) {
@@ -486,6 +563,17 @@ class PsAdminTasks extends HTMLElement {
       const thit = s.getElementById("f-timer-hit")?.value || "success";
       data.timerBonus = (tt > 0 && tm > 0) ? { targetSeconds: tt, multiplier: tm, mode: tmode, tickSound: ttick, hitSound: thit } : null;
 
+      const bonusCriteria = [];
+      s.querySelectorAll(".bonus-criterion-row").forEach((row) => {
+        const label = row.querySelector(".criterion-label").value.trim();
+        const multiplier = parseFloat(row.querySelector(".criterion-multiplier").value);
+        if (label && multiplier > 0) {
+          const existingId = row.dataset.criterionId;
+          bonusCriteria.push({ id: existingId || tracker.uid(), label, multiplier });
+        }
+      });
+      data.bonusCriteria = bonusCriteria.length > 0 ? bonusCriteria : null;
+
       const assignedUsers = [];
       s.querySelectorAll("[data-user-id]").forEach((cb) => {
         if (cb.checked) assignedUsers.push(cb.dataset.userId);
@@ -497,6 +585,7 @@ class PsAdminTasks extends HTMLElement {
       data.assignedUsers = [];
       data.streakBonus = null;
       data.timerBonus = null;
+      data.bonusCriteria = null;
     }
 
     if (this._editing === "new") {
