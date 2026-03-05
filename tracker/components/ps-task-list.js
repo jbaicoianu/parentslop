@@ -38,7 +38,7 @@ class PsTaskList extends HTMLElement {
     const user = tracker.getCurrentUser();
     if (!user) return;
 
-    const tasks = tracker.getTasksForUser(user.id);
+    const tasks = tracker.getTasksForUser(user.id).filter((t) => t.category !== "jobboard");
 
     const rewardText = (t) => {
       if (!t.rewards || Object.keys(t.rewards).length === 0) return "—";
