@@ -207,7 +207,8 @@ class PsDashboard extends HTMLElement {
     // Recent activity (default 1 day, expand to 7 days)
     const earningsDays = this._showAllEarnings ? 7 : 1;
     const earningsCutoff = new Date();
-    earningsCutoff.setDate(earningsCutoff.getDate() - earningsDays);
+    earningsCutoff.setHours(0, 0, 0, 0); // midnight today, local time
+    earningsCutoff.setDate(earningsCutoff.getDate() - (earningsDays - 1));
     const earningsCutoffISO = earningsCutoff.toISOString();
     const allRecentEarnings = trackerStore.completions.data
       .filter((c) => c.userId === user.id && !c.isPenalty && (c.status === "approved" || c.status === "pending") && (c.approvedAt || c.completedAt) >= earningsCutoffISO)

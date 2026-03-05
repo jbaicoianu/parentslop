@@ -523,7 +523,8 @@ function updateShopItem(itemId, updates) {
 
 function getRecentPenalties(userId, days = 7) {
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
+  cutoff.setHours(0, 0, 0, 0); // midnight today, local time
+  cutoff.setDate(cutoff.getDate() - (days - 1));
   const cutoffISO = cutoff.toISOString();
 
   return completionStore.data.filter(
