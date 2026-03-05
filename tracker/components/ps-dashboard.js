@@ -79,7 +79,10 @@ class PsDashboard extends HTMLElement {
           .filter(([, amt]) => amt > 0)
           .map(([cid, amt]) => "+" + tracker.formatAmount(amt, cid))
           .join(", ");
-        return { ...kid, dailyDone, dailyTotal, activeJobs, balances, recentPenaltyCount, pendingText };
+        const pendingApprovals = trackerStore.completions.data.filter(
+          (c) => c.userId === kid.id && c.status === "pending"
+        );
+        return { ...kid, dailyDone, dailyTotal, activeJobs, balances, recentPenaltyCount, pendingText, pendingApprovals };
       });
     }
 
@@ -1042,6 +1045,22 @@ class PsDashboard extends HTMLElement {
           color: var(--warning);
           margin-top: 2px;
         }
+        .kid-pending-approvals {
+          margin-top: 6px;
+          padding: 6px 8px;
+          background: rgba(241, 250, 140, 0.06);
+          border: 1px solid rgba(241, 250, 140, 0.12);
+          border-radius: var(--radius-sm);
+        }
+        .kid-pending-item {
+          font-size: 0.72rem;
+          color: var(--warning);
+          padding: 2px 0;
+        }
+        .kid-pending-amount {
+          color: var(--muted);
+          font-size: 0.68rem;
+        }
         .kid-penalties-note {
           font-size: 0.72rem;
           color: var(--danger);
@@ -1144,6 +1163,15 @@ class PsDashboard extends HTMLElement {
                       ${kid.balances.map((b) => `<span>${b.formatted}</span>`).join(" · ")}
                     </div>
                     ${kid.pendingText ? `<div class="kid-pending-note">${kid.pendingText} pending</div>` : ""}
+                    ${kid.pendingApprovals.length > 0 ? `
+                      <div class="kid-pending-approvals">
+                        ${kid.pendingApprovals.map((c) => {
+                          const task = trackerStore.tasks.data.find((t) => t.id === c.taskId);
+                          const rText = Object.entries(c.rewards || {}).filter(([, a]) => a > 0).map(([cid, a]) => tracker.formatAmount(a, cid)).join(", ");
+                          return `<div class="kid-pending-item">${task?.name || "?"} <span class="kid-pending-amount">${rText}</span></div>`;
+                        }).join("")}
+                      </div>
+                    ` : ""}
                     ${kid.recentPenaltyCount > 0 ? `
                       <div class="kid-penalties-note">${kid.recentPenaltyCount} penalt${kid.recentPenaltyCount === 1 ? "y" : "ies"} this week</div>
                     ` : ""}
