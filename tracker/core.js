@@ -35,10 +35,11 @@ const bus = new EventBus();
 // --- TrackerStore ------------------------------------------------------------
 
 class TrackerStore {
-  constructor(key, defaultValue) {
+  constructor(key, defaultValue, { localOnly = false } = {}) {
     this._key = key;
     this._default = defaultValue;
     this._data = undefined;
+    this._localOnly = localOnly;
   }
 
   load() {
@@ -61,10 +62,14 @@ class TrackerStore {
     if (data !== undefined) this._data = data;
     localStorage.setItem(this._key, JSON.stringify(this._data));
     bus.emit(`store:${this._key}`, this._data);
-    this._persistToServer();
+    if (!this._localOnly) this._persistToServer();
   }
 
   async fetchFromServer() {
+    if (this._localOnly) {
+      this.load();
+      return true;
+    }
     try {
       const res = await fetch(`/api/store/${encodeURIComponent(this._key)}`);
       if (!res.ok) {
@@ -116,7 +121,7 @@ const appStore = new TrackerStore("parentslop.app.v1", {
   setupComplete: false,
   currentUserId: null,
   currentView: "dashboard",
-});
+}, { localOnly: true });
 const jobClaimStore = new TrackerStore("parentslop.jobclaims.v1", []);
 const worklogStore = new TrackerStore("parentslop.worklog.v1", []);
 
@@ -1108,6 +1113,7 @@ async function initStores() {
     if (appStore.data.setupComplete && onServer.includes(false)) {
       const stores = {};
       for (const s of ALL_STORES) {
+        if (s._localOnly) continue;
         stores[s._key] = JSON.stringify(s._data);
       }
       await fetch("/api/store/sync", {
