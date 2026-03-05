@@ -125,7 +125,7 @@ class PsDashboard extends HTMLElement {
         }
         _earningsSeenCutoff = this._earningsCutoffForSession;
         const unseenEarnings = trackerStore.completions.data.filter(
-          (c) => c.userId === user.id && !c.isPenalty && c.status === "approved" && (c.approvedAt || c.completedAt) > _earningsSeenCutoff
+          (c) => c.userId === user.id && !c.isPenalty && (c.status === "approved" || c.status === "rejected") && (c.rejectedAt || c.approvedAt || c.completedAt) > _earningsSeenCutoff
         ).length;
         if (unseenEarnings > 0) {
           user.lastEarningsSeenAt = tracker.now();
@@ -211,19 +211,20 @@ class PsDashboard extends HTMLElement {
     earningsCutoff.setDate(earningsCutoff.getDate() - (earningsDays - 1));
     const earningsCutoffISO = earningsCutoff.toISOString();
     const allRecentEarnings = trackerStore.completions.data
-      .filter((c) => c.userId === user.id && !c.isPenalty && (c.status === "approved" || c.status === "pending") && (c.approvedAt || c.completedAt) >= earningsCutoffISO)
-      .sort((a, b) => (b.approvedAt || b.completedAt).localeCompare(a.approvedAt || a.completedAt));
+      .filter((c) => c.userId === user.id && !c.isPenalty && (c.status === "approved" || c.status === "pending" || c.status === "rejected") && (c.rejectedAt || c.approvedAt || c.completedAt) >= earningsCutoffISO)
+      .sort((a, b) => (b.rejectedAt || b.approvedAt || b.completedAt).localeCompare(a.rejectedAt || a.approvedAt || a.completedAt));
     const recentEarnings = allRecentEarnings
       .map((c) => {
         const task = trackerStore.tasks.data.find((t) => t.id === c.taskId);
-        const earningTs = c.approvedAt || c.completedAt;
+        const earningTs = c.rejectedAt || c.approvedAt || c.completedAt;
         const isNew = _earningsSeenCutoff && earningTs > _earningsSeenCutoff;
         const isPending = c.status === "pending";
+        const isRejected = c.status === "rejected";
         const rewardText = Object.entries(c.rewards || {})
           .filter(([, amt]) => amt > 0)
           .map(([cid, amt]) => "+" + tracker.formatAmount(amt, cid))
           .join(", ");
-        return { ...c, taskName: task?.name || "Unknown", isNew, isPending, rewardText, earningTs };
+        return { ...c, taskName: task?.name || "Unknown", isNew, isPending, isRejected, rewardText, earningTs };
       });
 
     // Streaks
@@ -508,12 +509,35 @@ class PsDashboard extends HTMLElement {
           padding: 8px 0;
           font-size: 0.82rem;
           border-bottom: 1px solid rgba(80, 250, 123, 0.06);
+          flex-wrap: wrap;
         }
         .earnings-row:last-child { border-bottom: none; }
         .earnings-name { flex: 1; color: var(--text); }
         .earnings-time { color: var(--muted); font-size: 0.72rem; }
         .earnings-amount { color: var(--success); font-weight: 600; font-size: 0.82rem; }
         .earnings-row.earnings-pending .earnings-amount { color: var(--warning); }
+        .earnings-row.earnings-rejected { opacity: 0.7; }
+        .earnings-row.earnings-rejected .earnings-name { text-decoration: line-through; color: var(--muted); }
+        .earnings-row.earnings-rejected .earnings-amount { color: var(--danger); }
+        .earnings-rejected-badge {
+          font-size: 0.6rem;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          color: var(--danger);
+          background: rgba(255, 107, 129, 0.12);
+          padding: 2px 6px;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 107, 129, 0.2);
+          flex-shrink: 0;
+        }
+        .earnings-rejection-note {
+          width: 100%;
+          font-size: 0.7rem;
+          color: var(--muted);
+          font-style: italic;
+          margin-top: 2px;
+        }
         .earnings-pending-badge {
           font-size: 0.6rem;
           font-weight: 700;
@@ -1170,12 +1194,14 @@ class PsDashboard extends HTMLElement {
               <div class="earnings-section">
                 <div class="earnings-title">Recent Earnings</div>
                 ${recentEarnings.map((e) => `
-                  <div class="earnings-row${e.isNew ? " earnings-unseen" : ""}${e.isPending ? " earnings-pending" : ""}">
+                  <div class="earnings-row${e.isNew ? " earnings-unseen" : ""}${e.isPending ? " earnings-pending" : ""}${e.isRejected ? " earnings-rejected" : ""}">
                     ${e.isNew ? '<span class="earnings-new-badge">NEW</span>' : ""}
+                    ${e.isRejected ? '<span class="earnings-rejected-badge">rejected</span>' : ""}
                     ${e.isPending ? '<span class="earnings-pending-badge">pending</span>' : ""}
                     <span class="earnings-name">${e.taskName}</span>
                     <span class="earnings-time">${timeAgo(e.earningTs)}</span>
-                    <span class="earnings-amount">${e.rewardText}</span>
+                    <span class="earnings-amount">${e.isRejected ? "—" : e.rewardText}</span>
+                    ${e.isRejected && e.rejectionNote ? `<div class="earnings-rejection-note">${e.rejectionNote}</div>` : ""}
                   </div>
                 `).join("")}
                 ${this._showAllEarnings ? `<a class="view-more-link" id="toggle-earnings">Show today only</a>` : `<a class="view-more-link" id="toggle-earnings">Show last 7 days</a>`}

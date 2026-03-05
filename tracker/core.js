@@ -356,11 +356,12 @@ function approveCompletion(completionId, checkedCriteria = []) {
   bus.emit("completion:approved", c);
 }
 
-function rejectCompletion(completionId) {
+function rejectCompletion(completionId, note = "") {
   const c = completionStore.data.find((x) => x.id === completionId);
   if (!c || c.status !== "pending") return;
   c.status = "rejected";
   c.rejectedAt = now();
+  if (note) c.rejectionNote = note;
   completionStore.save();
   bus.emit("completion:rejected", c);
 }

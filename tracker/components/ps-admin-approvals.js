@@ -264,10 +264,11 @@ class PsAdminApprovals extends HTMLElement {
 
     this.shadowRoot.querySelectorAll("[data-reject]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        if (confirm("Reject this completion?")) {
-          tracker.rejectCompletion(btn.dataset.reject);
-          eventBus.emit("toast:show", { message: "Rejected.", type: "danger" });
-        }
+        const note = prompt("Rejection reason (optional):");
+        if (note === null) return; // cancelled
+        tracker.rejectCompletion(btn.dataset.reject, note);
+        if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
+        eventBus.emit("toast:show", { message: "Rejected.", type: "danger" });
       });
     });
 
