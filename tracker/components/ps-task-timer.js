@@ -202,9 +202,13 @@ class PsTaskTimer extends HTMLElement {
       if (bonusApplied) {
         this._showBurst();
       }
-      if (result.status !== "pending") {
-        const sfx = window.slopSFX;
-        if (sfx) sfx.cashJingle();
+      const sfx = window.slopSFX;
+      if (sfx) {
+        if (result.status === "pending") {
+          sfx.submitted();
+        } else {
+          sfx.cashJingle();
+        }
       }
 
       eventBus.emit("toast:show", {

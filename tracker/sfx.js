@@ -137,6 +137,15 @@ class SlopSFX {
 
   // --- Reward / penalty sounds ---
 
+  // Submitted for approval: bright upward whoosh with a questioning resolve
+  submitted() {
+    const ctx = this._ensureCtx();
+    const t = ctx.currentTime;
+    this._sweep(600, 1200, "sine", t, 0.12, 0.16);          // rising whoosh
+    this._tone(1174.66, "triangle", t + 0.1, 0.15, 0.14);   // D6 chime
+    this._tone(1318.51, "triangle", t + 0.2, 0.22, 0.1);    // E6 resolve
+  }
+
   // Cash register jingle: bright chirpy triple ding with shimmer tail
   cashJingle() {
     const ctx = this._ensureCtx();

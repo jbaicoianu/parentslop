@@ -10,6 +10,8 @@ class PsDashboard extends HTMLElement {
     this._penaltyPickerOpen = false;
     this._showAllEarnings = false;
     this._showAllPenalties = false;
+    this._earningsCutoffForSession = null;
+    this._penaltyCutoffForSession = null;
   }
 
   connectedCallback() {
@@ -89,7 +91,11 @@ class PsDashboard extends HTMLElement {
         user.lastPenaltySeenAt = tracker.now();
         trackerStore.users.save();
       } else {
-        _penaltySeenCutoff = user.lastPenaltySeenAt;
+        // Capture cutoff once per session so re-renders keep showing NEW badges
+        if (!this._penaltyCutoffForSession) {
+          this._penaltyCutoffForSession = user.lastPenaltySeenAt;
+        }
+        _penaltySeenCutoff = this._penaltyCutoffForSession;
         const unseenCount = trackerStore.completions.data.filter(
           (c) => c.userId === user.id && c.isPenalty && c.completedAt > _penaltySeenCutoff
         ).length;
@@ -113,7 +119,11 @@ class PsDashboard extends HTMLElement {
         user.lastEarningsSeenAt = tracker.now();
         trackerStore.users.save();
       } else {
-        _earningsSeenCutoff = user.lastEarningsSeenAt;
+        // Capture cutoff once per session so re-renders keep showing NEW badges
+        if (!this._earningsCutoffForSession) {
+          this._earningsCutoffForSession = user.lastEarningsSeenAt;
+        }
+        _earningsSeenCutoff = this._earningsCutoffForSession;
         const unseenEarnings = trackerStore.completions.data.filter(
           (c) => c.userId === user.id && !c.isPenalty && c.status === "approved" && (c.approvedAt || c.completedAt) > _earningsSeenCutoff
         ).length;
@@ -194,12 +204,12 @@ class PsDashboard extends HTMLElement {
       return { ...p, taskName: task?.name || "Unknown", isNew, unseenOrder };
     });
 
-    // Recent earnings (last 7 days, approved non-penalty completions)
+    // Recent activity (last 7 days, approved + pending non-penalty completions)
     const earningsCutoff = new Date();
     earningsCutoff.setDate(earningsCutoff.getDate() - 7);
     const earningsCutoffISO = earningsCutoff.toISOString();
     const allRecentEarnings = trackerStore.completions.data
-      .filter((c) => c.userId === user.id && !c.isPenalty && c.status === "approved" && (c.approvedAt || c.completedAt) >= earningsCutoffISO)
+      .filter((c) => c.userId === user.id && !c.isPenalty && (c.status === "approved" || c.status === "pending") && (c.approvedAt || c.completedAt) >= earningsCutoffISO)
       .sort((a, b) => (b.approvedAt || b.completedAt).localeCompare(a.approvedAt || a.completedAt));
     const earningsLimit = this._showAllEarnings ? allRecentEarnings.length : 5;
     const recentEarnings = allRecentEarnings
@@ -208,11 +218,12 @@ class PsDashboard extends HTMLElement {
         const task = trackerStore.tasks.data.find((t) => t.id === c.taskId);
         const earningTs = c.approvedAt || c.completedAt;
         const isNew = _earningsSeenCutoff && earningTs > _earningsSeenCutoff;
+        const isPending = c.status === "pending";
         const rewardText = Object.entries(c.rewards || {})
           .filter(([, amt]) => amt > 0)
           .map(([cid, amt]) => "+" + tracker.formatAmount(amt, cid))
           .join(", ");
-        return { ...c, taskName: task?.name || "Unknown", isNew, rewardText, earningTs };
+        return { ...c, taskName: task?.name || "Unknown", isNew, isPending, rewardText, earningTs };
       });
 
     // Streaks
@@ -502,6 +513,19 @@ class PsDashboard extends HTMLElement {
         .earnings-name { flex: 1; color: var(--text); }
         .earnings-time { color: var(--muted); font-size: 0.72rem; }
         .earnings-amount { color: var(--success); font-weight: 600; font-size: 0.82rem; }
+        .earnings-row.earnings-pending .earnings-amount { color: var(--warning); }
+        .earnings-pending-badge {
+          font-size: 0.6rem;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          color: var(--warning);
+          background: rgba(241, 250, 140, 0.12);
+          padding: 2px 6px;
+          border-radius: 999px;
+          border: 1px solid rgba(241, 250, 140, 0.2);
+          flex-shrink: 0;
+        }
         .earnings-row.earnings-unseen {
           animation: earningsGlow 800ms ease-out both;
           background: rgba(80, 250, 123, 0.1);
@@ -1146,8 +1170,9 @@ class PsDashboard extends HTMLElement {
               <div class="earnings-section">
                 <div class="earnings-title">Recent Earnings</div>
                 ${recentEarnings.map((e) => `
-                  <div class="earnings-row${e.isNew ? " earnings-unseen" : ""}">
+                  <div class="earnings-row${e.isNew ? " earnings-unseen" : ""}${e.isPending ? " earnings-pending" : ""}">
                     ${e.isNew ? '<span class="earnings-new-badge">NEW</span>' : ""}
+                    ${e.isPending ? '<span class="earnings-pending-badge">pending</span>' : ""}
                     <span class="earnings-name">${e.taskName}</span>
                     <span class="earnings-time">${timeAgo(e.earningTs)}</span>
                     <span class="earnings-amount">${e.rewardText}</span>
@@ -1303,6 +1328,7 @@ class PsDashboard extends HTMLElement {
         setTimeout(() => {
           const result = tracker.submitFixedJob(taskId, user.id);
           if (result && result.status === "pending") {
+            if (typeof slopSFX !== "undefined") slopSFX.submitted();
             eventBus.emit("toast:show", { message: "Submitted for approval!", type: "warning" });
           } else if (result) {
             const rewardText = Object.entries(result.rewards || {})
@@ -1346,7 +1372,8 @@ class PsDashboard extends HTMLElement {
 
         setTimeout(() => {
           tracker.submitHourlyWork(taskId, user.id);
-          eventBus.emit("toast:show", { message: "Work submitted for approval!", type: "success" });
+          if (typeof slopSFX !== "undefined") slopSFX.submitted();
+          eventBus.emit("toast:show", { message: "Work submitted for approval!", type: "warning" });
           this.render();
         }, 500);
       });
@@ -1519,8 +1546,9 @@ class PsDashboard extends HTMLElement {
       }
     }
 
-    // Step 3: Play sound
-    if (typeof slopSFX !== "undefined") {
+    // Step 3: Play sound (skip for approval-required tasks — submitted() plays later)
+    const needsApproval = task && task.requiresApproval;
+    if (typeof slopSFX !== "undefined" && !needsApproval) {
       if (type === "jobboard") {
         slopSFX.grab();
       } else {
@@ -1533,6 +1561,7 @@ class PsDashboard extends HTMLElement {
       const result = tracker.completeTask(taskId, userId);
 
       if (result && result.status === "pending") {
+        if (typeof slopSFX !== "undefined") slopSFX.submitted();
         eventBus.emit("toast:show", { message: "Submitted for approval!", type: "warning" });
       } else if (result) {
         const rewardText = Object.entries(result.rewards || {})
