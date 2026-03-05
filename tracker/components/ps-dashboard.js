@@ -194,26 +194,25 @@ class PsDashboard extends HTMLElement {
     }).filter((x) => x.completion).sort((a, b) => b.completion.completedAt.localeCompare(a.completion.completedAt));
 
     // Penalties
-    const penalties = tracker.getRecentPenalties(user.id, 7);
+    const penaltyDays = this._showAllPenalties ? 7 : 1;
+    const penalties = tracker.getRecentPenalties(user.id, penaltyDays);
     let _unseenIdx = 0;
-    const penaltyLimit = this._showAllPenalties ? penalties.length : 5;
-    const penaltyDetails = penalties.slice(0, penaltyLimit).map((p) => {
+    const penaltyDetails = penalties.map((p) => {
       const task = trackerStore.tasks.data.find((t) => t.id === p.taskId);
       const isNew = _penaltySeenCutoff && p.completedAt > _penaltySeenCutoff;
       const unseenOrder = isNew ? _unseenIdx++ : 0;
       return { ...p, taskName: task?.name || "Unknown", isNew, unseenOrder };
     });
 
-    // Recent activity (last 7 days, approved + pending non-penalty completions)
+    // Recent activity (default 1 day, expand to 7 days)
+    const earningsDays = this._showAllEarnings ? 7 : 1;
     const earningsCutoff = new Date();
-    earningsCutoff.setDate(earningsCutoff.getDate() - 7);
+    earningsCutoff.setDate(earningsCutoff.getDate() - earningsDays);
     const earningsCutoffISO = earningsCutoff.toISOString();
     const allRecentEarnings = trackerStore.completions.data
       .filter((c) => c.userId === user.id && !c.isPenalty && (c.status === "approved" || c.status === "pending") && (c.approvedAt || c.completedAt) >= earningsCutoffISO)
       .sort((a, b) => (b.approvedAt || b.completedAt).localeCompare(a.approvedAt || a.completedAt));
-    const earningsLimit = this._showAllEarnings ? allRecentEarnings.length : 5;
     const recentEarnings = allRecentEarnings
-      .slice(0, earningsLimit)
       .map((c) => {
         const task = trackerStore.tasks.data.find((t) => t.id === c.taskId);
         const earningTs = c.approvedAt || c.completedAt;
@@ -1178,7 +1177,7 @@ class PsDashboard extends HTMLElement {
                     <span class="earnings-amount">${e.rewardText}</span>
                   </div>
                 `).join("")}
-                ${allRecentEarnings.length > 5 ? `<a class="view-more-link" id="toggle-earnings">${this._showAllEarnings ? "Show less" : `View all ${allRecentEarnings.length} earnings`}</a>` : ""}
+                ${this._showAllEarnings ? `<a class="view-more-link" id="toggle-earnings">Show today only</a>` : `<a class="view-more-link" id="toggle-earnings">Show last 7 days</a>`}
               </div>
             ` : ""}
             ${penaltyDetails.length > 0 ? `
@@ -1197,7 +1196,7 @@ class PsDashboard extends HTMLElement {
                     </div>
                   `;
                 }).join("")}
-                ${penalties.length > 5 ? `<a class="view-more-link" id="toggle-penalties">${this._showAllPenalties ? "Show less" : `View all ${penalties.length} penalties`}</a>` : ""}
+                ${this._showAllPenalties ? `<a class="view-more-link" id="toggle-penalties">Show today only</a>` : `<a class="view-more-link" id="toggle-penalties">Show last 7 days</a>`}
               </div>
             ` : ""}
           </div>
