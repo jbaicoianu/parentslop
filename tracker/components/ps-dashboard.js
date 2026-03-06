@@ -238,6 +238,17 @@ class PsDashboard extends HTMLElement {
       .filter((s) => s.streak > 0)
       .sort((a, b) => b.streak - a.streak);
 
+    // Streak tier helper
+    const streakTier = (count) => {
+      if (count >= 100) return { color: "#f1fa8c", glow: "rgba(241,250,140,0.4)" };
+      if (count >= 60)  return { color: "#ff79c6", glow: "rgba(255,121,198,0.4)" };
+      if (count >= 30)  return { color: "#bd93f9", glow: "rgba(189,147,249,0.4)" };
+      if (count >= 14)  return { color: "#66d9ef", glow: "rgba(102,217,239,0.4)" };
+      if (count >= 7)   return { color: "#ffd700", glow: "rgba(255,215,0,0.4)" };
+      if (count >= 3)   return { color: "#c0c0c0", glow: "rgba(192,192,192,0.4)" };
+      return { color: "#cd7f32", glow: "rgba(205,127,50,0.4)" };
+    };
+
     // Reward summary helper
     const rewardSummary = (t) => {
       if (!t.rewards || Object.keys(t.rewards).length === 0) return "";
@@ -862,19 +873,95 @@ class PsDashboard extends HTMLElement {
         }
 
         /* Streaks */
-        .streak-row {
+        .streak-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+          gap: 10px;
+          margin-top: 8px;
+        }
+        .streak-badge {
           display: flex;
+          flex-direction: column;
           align-items: center;
-          gap: 8px;
-          font-size: 0.82rem;
-          padding: 6px 0;
+          padding: 12px 6px 10px;
+          border-radius: var(--radius-md);
+          background: linear-gradient(145deg, #161724, #0e0f18);
+          border: 1px solid rgba(255, 255, 255, 0.05);
+          transition: transform 0.2s;
         }
-        .streak-count {
+        .streak-badge:hover {
+          transform: scale(1.05);
+        }
+        .streak-badge.bonus-active {
+          animation: streakGlow 2s ease-in-out infinite;
+        }
+        .streak-shield {
+          position: relative;
+          width: 40px;
+          height: 48px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+        }
+        .streak-shield svg {
+          position: absolute;
+          top: 0;
+          left: 0;
+        }
+        .streak-shield-count {
+          position: relative;
+          z-index: 1;
+          font-weight: 800;
+          font-size: 0.9rem;
+          color: #fff;
+          text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+        }
+        .streak-shield-unit {
+          position: relative;
+          z-index: 1;
+          font-size: 0.5rem;
+          font-weight: 600;
+          color: rgba(255,255,255,0.7);
+          margin-top: -1px;
+          letter-spacing: 0.02em;
+        }
+        .streak-badge-name {
+          margin-top: 6px;
+          font-size: 0.72rem;
+          color: var(--muted);
+          text-align: center;
+          max-width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .streak-badge-bonus {
+          font-size: 0.65rem;
           font-weight: 700;
-          color: var(--warning);
-          min-width: 28px;
+          margin-top: 3px;
         }
-        .streak-name { color: var(--muted); }
+        .streak-inline {
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          padding: 1px 6px;
+          border-radius: 999px;
+          font-size: 0.68rem;
+          font-weight: 700;
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.08);
+        }
+        .streak-inline-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          display: inline-block;
+        }
+        @keyframes streakGlow {
+          0%, 100% { box-shadow: 0 0 4px var(--glow-color, rgba(255, 200, 50, 0.15)); }
+          50% { box-shadow: 0 0 14px var(--glow-color, rgba(255, 200, 50, 0.35)), 0 0 4px var(--glow-color, rgba(255, 200, 50, 0.2)); }
+        }
 
         /* Celebration animation */
         .completing {
@@ -1387,7 +1474,7 @@ class PsDashboard extends HTMLElement {
                 <div class="task-name">
                   ${t.name}
                   ${t.timerBonus ? `<span class="has-timer">&#x23F1;</span>` : ""}
-                  ${streak > 0 ? `<span class="badge badge-streak">${streak}${t.recurrence === "weekly" ? "w" : "d"}${t.streakBonus && streak >= t.streakBonus.threshold ? " " + t.streakBonus.multiplier + "x" : ""}</span>` : ""}
+                  ${streak > 0 ? (() => { const st = streakTier(streak); return `<span class="streak-inline"><span class="streak-inline-dot" style="background:${st.color}"></span>${streak} ${t.recurrence === "weekly" ? (streak === 1 ? "week" : "weeks") : (streak === 1 ? "day" : "days")}${t.streakBonus && streak >= t.streakBonus.threshold ? " " + t.streakBonus.multiplier + "x" : ""}</span>`; })() : ""}
                 </div>
                 <span class="task-reward">${rewardSummary(t)}</span>
                 <button class="complete-btn" data-task-id="${t.id}">${t.timerBonus ? "Start" : "Done"}</button>
@@ -1429,16 +1516,28 @@ class PsDashboard extends HTMLElement {
 
         <!-- F. Active Streaks -->
         ${streaks.length > 0 ? `
-          <div class="section-title section-gap">Active Streaks</div>
-          ${streaks.map((s) => `
-            <div class="streak-row">
-              <span class="streak-count">${s.streak}${s.task.recurrence === "weekly" ? "w" : "d"}</span>
-              <span class="streak-name">${s.task.name}</span>
-              ${s.task.streakBonus && s.streak >= s.task.streakBonus.threshold
-                ? `<span class="badge badge-streak">&#x1F525; ${s.task.streakBonus.multiplier}x bonus active</span>`
-                : ""}
-            </div>
-          `).join("")}
+          <div class="section-title section-gap"><span class="section-icon">&#x1F525;</span> Active Streaks</div>
+          <div class="streak-grid">
+            ${streaks.map((s) => {
+              const tier = streakTier(s.streak);
+              const unit = s.task.recurrence === "weekly" ? (s.streak === 1 ? "week" : "weeks") : (s.streak === 1 ? "day" : "days");
+              const hasBonus = s.task.streakBonus && s.streak >= s.task.streakBonus.threshold;
+              return `
+              <div class="streak-badge${hasBonus ? " bonus-active" : ""}" style="${hasBonus ? `--glow-color: ${tier.glow}` : ""}">
+                <div class="streak-shield">
+                  <svg width="40" height="48" viewBox="0 0 40 48">
+                    <path d="M20 2 L38 10 L38 28 Q38 40 20 46 Q2 40 2 28 L2 10 Z"
+                          fill="${tier.color}" fill-opacity="0.18"
+                          stroke="${tier.color}" stroke-width="2" stroke-opacity="0.6"/>
+                  </svg>
+                  <span class="streak-shield-count" style="color: ${tier.color}">${s.streak}</span>
+                  <span class="streak-shield-unit" style="color: ${tier.color}">${unit}</span>
+                </div>
+                <span class="streak-badge-name">${s.task.name}</span>
+                ${hasBonus ? `<span class="streak-badge-bonus" style="color: ${tier.color}">&#x1F525; ${s.task.streakBonus.multiplier}x</span>` : ""}
+              </div>`;
+            }).join("")}
+          </div>
         ` : ""}
       </div>
     `;
