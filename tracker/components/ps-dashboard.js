@@ -12,6 +12,7 @@ class PsDashboard extends HTMLElement {
     this._showAllPenalties = false;
     this._earningsCutoffForSession = null;
     this._penaltyCutoffForSession = null;
+    this._expandedApprovalId = null;
   }
 
   connectedCallback() {
@@ -21,6 +22,7 @@ class PsDashboard extends HTMLElement {
       eventBus.on("tasks:changed", () => this.render()),
       eventBus.on("completion:added", () => this.render()),
       eventBus.on("completion:approved", () => this.render()),
+      eventBus.on("completion:rejected", () => this.render()),
       eventBus.on("currencies:changed", () => this.render()),
       eventBus.on("jobclaims:changed", () => this.render()),
       eventBus.on("worklog:changed", () => this.render()),
@@ -1055,11 +1057,94 @@ class PsDashboard extends HTMLElement {
         .kid-pending-item {
           font-size: 0.72rem;
           color: var(--warning);
-          padding: 2px 0;
+          padding: 4px 6px;
+          margin: 2px -6px;
+          border-radius: var(--radius-sm);
+          cursor: pointer;
+          transition: background 120ms;
+        }
+        .kid-pending-item:hover {
+          background: rgba(241, 250, 140, 0.08);
+        }
+        .kid-pending-item.expanded {
+          background: rgba(241, 250, 140, 0.06);
         }
         .kid-pending-amount {
           color: var(--muted);
           font-size: 0.68rem;
+        }
+        .kid-approval-inline {
+          margin-top: 6px;
+          padding: 8px 10px;
+          border-radius: var(--radius-sm);
+          background: rgba(102, 217, 239, 0.04);
+          border: 1px solid rgba(102, 217, 239, 0.1);
+        }
+        .kid-approval-btns {
+          display: flex;
+          gap: 6px;
+          margin-top: 6px;
+        }
+        .kid-approval-btns button {
+          appearance: none;
+          border: none;
+          border-radius: 999px;
+          padding: 5px 12px;
+          font-size: 0.72rem;
+          font-weight: 600;
+          cursor: pointer;
+          font-family: inherit;
+          min-height: 30px;
+          transition: background 160ms ease-out;
+        }
+        .kid-approve-btn {
+          background: rgba(80, 250, 123, 0.12);
+          color: #50fa7b;
+          border: 1px solid rgba(80, 250, 123, 0.2);
+        }
+        .kid-approve-btn:hover { background: rgba(80, 250, 123, 0.22); }
+        .kid-reject-btn {
+          background: rgba(255, 107, 129, 0.1);
+          color: #ff6b81;
+          border: 1px solid rgba(255, 107, 129, 0.15);
+        }
+        .kid-reject-btn:hover { background: rgba(255, 107, 129, 0.2); }
+        .kid-criteria-section {
+          margin: 6px 0 2px;
+          padding: 6px 8px;
+          border-radius: var(--radius-sm);
+          background: rgba(102, 217, 239, 0.04);
+          border: 1px solid rgba(102, 217, 239, 0.08);
+        }
+        .kid-criteria-label {
+          font-size: 0.66rem;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          margin-bottom: 4px;
+        }
+        .kid-criterion-check {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          margin-bottom: 3px;
+          font-size: 0.72rem;
+          color: var(--text);
+        }
+        .kid-criterion-check input[type="checkbox"] {
+          accent-color: var(--accent);
+          width: 14px;
+          height: 14px;
+        }
+        .kid-criterion-mult {
+          color: var(--muted);
+          font-size: 0.66rem;
+        }
+        .kid-adjusted-payout {
+          font-size: 0.7rem;
+          color: var(--accent);
+          margin-top: 4px;
+          font-weight: 500;
         }
         .kid-penalties-note {
           font-size: 0.72rem;
@@ -1168,7 +1253,30 @@ class PsDashboard extends HTMLElement {
                         ${kid.pendingApprovals.map((c) => {
                           const task = trackerStore.tasks.data.find((t) => t.id === c.taskId);
                           const rText = Object.entries(c.rewards || {}).filter(([, a]) => a > 0).map(([cid, a]) => tracker.formatAmount(a, cid)).join(", ");
-                          return `<div class="kid-pending-item">${task?.name || "?"} <span class="kid-pending-amount">${rText}</span></div>`;
+                          const isExpanded = this._expandedApprovalId === c.id;
+                          return `<div class="kid-pending-item${isExpanded ? " expanded" : ""}" data-completion-id="${c.id}">
+                            ${task?.name || "?"} <span class="kid-pending-amount">${rText}</span>
+                            ${isExpanded ? `
+                              <div class="kid-approval-inline" data-inline-for="${c.id}">
+                                ${task?.bonusCriteria?.length > 0 ? `
+                                  <div class="kid-criteria-section" data-kid-criteria-for="${c.id}">
+                                    <div class="kid-criteria-label">Bonus Criteria</div>
+                                    ${task.bonusCriteria.map((bc) => `
+                                      <label class="kid-criterion-check">
+                                        <input type="checkbox" data-criterion-id="${bc.id}" data-multiplier="${bc.multiplier}" />
+                                        ${bc.label} <span class="kid-criterion-mult">(${bc.multiplier}×)</span>
+                                      </label>
+                                    `).join("")}
+                                    <div class="kid-adjusted-payout" data-kid-adjusted-for="${c.id}" data-base-rewards='${JSON.stringify(c.rewards || {})}'></div>
+                                  </div>
+                                ` : ""}
+                                <div class="kid-approval-btns">
+                                  <button class="kid-approve-btn" data-kid-approve="${c.id}">Approve</button>
+                                  <button class="kid-reject-btn" data-kid-reject="${c.id}">Reject</button>
+                                </div>
+                              </div>
+                            ` : ""}
+                          </div>`;
                         }).join("")}
                       </div>
                     ` : ""}
@@ -1564,6 +1672,82 @@ class PsDashboard extends HTMLElement {
           this._openMenuId = null;
           this.render();
         });
+      });
+
+      // --- Inline approval: toggle expand on pending item click ---
+      root.querySelectorAll(".kid-pending-item[data-completion-id]").forEach((item) => {
+        item.addEventListener("click", (e) => {
+          if (e.target.closest("button") || e.target.closest("input") || e.target.closest("label")) return;
+          e.stopPropagation();
+          const cId = item.dataset.completionId;
+          this._expandedApprovalId = this._expandedApprovalId === cId ? null : cId;
+          this.render();
+        });
+      });
+
+      // --- Inline approval: approve button ---
+      root.querySelectorAll("[data-kid-approve]").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const completionId = btn.dataset.kidApprove;
+          const criteriaSection = root.querySelector(`[data-kid-criteria-for="${completionId}"]`);
+          const checkedIds = [];
+          if (criteriaSection) {
+            criteriaSection.querySelectorAll('input[type="checkbox"]:checked').forEach((cb) => {
+              checkedIds.push(cb.dataset.criterionId);
+            });
+          }
+          tracker.approveCompletion(completionId, checkedIds);
+          if (typeof slopSFX !== "undefined") slopSFX.cashJingle();
+          eventBus.emit("toast:show", { message: "Approved!", type: "success" });
+          this._expandedApprovalId = null;
+          this.render();
+        });
+      });
+
+      // --- Inline approval: reject button ---
+      root.querySelectorAll("[data-kid-reject]").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const note = prompt("Rejection reason (optional):");
+          if (note === null) return;
+          tracker.rejectCompletion(btn.dataset.kidReject, note);
+          if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
+          eventBus.emit("toast:show", { message: "Rejected.", type: "danger" });
+          this._expandedApprovalId = null;
+          this.render();
+        });
+      });
+
+      // --- Inline approval: live payout update for bonus criteria ---
+      root.querySelectorAll("[data-kid-criteria-for]").forEach((section) => {
+        const completionId = section.dataset.kidCriteriaFor;
+        const payoutEl = section.querySelector(`[data-kid-adjusted-for="${completionId}"]`);
+        if (!payoutEl) return;
+        const baseRewards = JSON.parse(payoutEl.dataset.baseRewards);
+        const checkboxes = section.querySelectorAll('input[type="checkbox"]');
+
+        const updatePayout = () => {
+          let multiplier = 1;
+          checkboxes.forEach((cb) => {
+            if (cb.checked) multiplier *= parseFloat(cb.dataset.multiplier);
+          });
+          if (multiplier === 1) {
+            payoutEl.textContent = "";
+          } else {
+            const adjusted = Object.entries(baseRewards)
+              .map(([cid, amt]) => {
+                const c = tracker.getCurrency(cid);
+                const decimals = c ? (c.decimals || 0) : 0;
+                const factor = Math.pow(10, decimals);
+                return tracker.formatAmount(Math.round(amt * multiplier * factor) / factor, cid);
+              })
+              .join(", ");
+            payoutEl.textContent = `Adjusted payout: ${adjusted}`;
+          }
+        };
+
+        checkboxes.forEach((cb) => cb.addEventListener("change", updatePayout));
       });
     }
   }
