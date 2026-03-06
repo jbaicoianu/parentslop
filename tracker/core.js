@@ -230,11 +230,36 @@ function calcStreak(taskId, userId) {
   const todayKey = keyFn(new Date().toISOString());
   let streak = 0;
   let expected = todayKey;
+  const activeDays = task.activeDays && task.activeDays.length > 0 ? task.activeDays : null;
+  const isDaily = task.recurrence !== "weekly";
+
+  // Skip today if it's not a scheduled day
+  if (isDaily && activeDays) {
+    let skipped = 0;
+    while (skipped < 6) {
+      const [ey, em, ed] = expected.split("-").map(Number);
+      const dow = new Date(ey, em - 1, ed).getDay();
+      if (activeDays.includes(dow)) break;
+      expected = prevKey(expected, "day");
+      skipped++;
+    }
+  }
 
   for (const k of keys) {
     if (k === expected) {
       streak++;
-      expected = prevKey(expected, task.recurrence === "weekly" ? "week" : "day");
+      expected = prevKey(expected, isDaily ? "day" : "week");
+      // Skip non-scheduled days when walking backwards
+      if (isDaily && activeDays) {
+        let skipped = 0;
+        while (skipped < 6) {
+          const [ey, em, ed] = expected.split("-").map(Number);
+          const dow = new Date(ey, em - 1, ed).getDay();
+          if (activeDays.includes(dow)) break;
+          expected = prevKey(expected, "day");
+          skipped++;
+        }
+      }
     } else if (k < expected) {
       // Gap found
       break;
@@ -470,6 +495,7 @@ function createTask(data) {
     bonusCriteria: data.bonusCriteria || null, // [{ id, label, multiplier }]
     category: data.category || "routine", // "routine" | "jobboard"
     payType: data.payType || "fixed", // "fixed" | "hourly"
+    activeDays: data.activeDays || [], // day numbers (0=Sun..6=Sat); empty = every day
     multiUser: data.multiUser ?? true, // whether multiple kids can accept
     maxPayout: data.maxPayout || null, // optional cap for hourly: { currencyId: amount }
     createdAt: now(),
@@ -604,6 +630,11 @@ function isTaskCompletedThisWeek(taskId, userId) {
   return completionStore.data.some(
     (c) => c.taskId === taskId && c.userId === userId && weekKey(c.completedAt) === thisWeek && c.status !== "rejected"
   );
+}
+
+function isTaskScheduledToday(task) {
+  if (!task.activeDays || task.activeDays.length === 0) return true;
+  return task.activeDays.includes(new Date().getDay());
 }
 
 // --- Admin: reset a user's daily tasks for today ----------------------------
@@ -1174,6 +1205,7 @@ window.tracker = {
   getTasksForUser,
   isTaskCompletedToday,
   isTaskCompletedThisWeek,
+  isTaskScheduledToday,
   resetDailyTasks,
   getRecentPenalties,
   migrateUsers,

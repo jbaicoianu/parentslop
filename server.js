@@ -92,7 +92,7 @@ const crypto = require("crypto");
 app.post("/api/feedback", (req, res) => {
   const { text, userId, userName, currentView, userAgent } = req.body;
   if (!text || !text.trim()) return res.status(400).json({ error: "missing text" });
-  const id = crypto.randomUUID();
+  const id = crypto.randomUUID().split("-")[0];
   const createdAt = new Date().toISOString();
   db.prepare(
     "INSERT INTO feedback (id, text, user_id, user_name, current_view, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"

@@ -62,7 +62,7 @@ class PsDashboard extends HTMLElement {
       const allUsers = trackerStore.users.data;
       adminKids = allUsers.map((kid) => {
         const kidTasks = tracker.getTasksForUser(kid.id);
-        const dailyTasks = kidTasks.filter((t) => t.recurrence === "daily" && t.category !== "jobboard");
+        const dailyTasks = kidTasks.filter((t) => t.recurrence === "daily" && t.category !== "jobboard" && tracker.isTaskScheduledToday(t));
         const dailyDone = dailyTasks.filter((t) => tracker.isTaskCompletedToday(t.id, kid.id)).length;
         const dailyTotal = dailyTasks.length;
         const activeJobClaims = tracker.getUserActiveJobs(kid.id);
@@ -146,6 +146,9 @@ class PsDashboard extends HTMLElement {
     const jobboardDone = [];
 
     for (const t of allTasks) {
+      // Skip daily tasks not scheduled for today
+      if (t.recurrence === "daily" && !tracker.isTaskScheduledToday(t)) continue;
+
       const isDone =
         t.recurrence === "weekly"
           ? tracker.isTaskCompletedThisWeek(t.id, user.id)

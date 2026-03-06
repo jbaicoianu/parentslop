@@ -70,7 +70,7 @@ class PsAdminTasks extends HTMLElement {
               <div class="task-item-info">
                 <div class="task-item-name">${t.name}</div>
                 <div class="task-item-meta">
-                  ${t.recurrence} · ${t.category === "jobboard" ? "job board" : "routine"} · ${this._rewardText(t)}
+                  ${t.recurrence}${t.activeDays?.length ? " (" + t.activeDays.map(d => ["Su","Mo","Tu","We","Th","Fr","Sa"][d]).join(",") + ")" : ""} · ${t.category === "jobboard" ? "job board" : "routine"} · ${this._rewardText(t)}
                   ${t.payType === "hourly" ? "· hourly" : ""}
                   ${t.maxPayout ? `· max ${this._rewardTextFromHash(t.maxPayout)}` : ""}
                   ${t.multiUser === false ? "· single" : ""}
@@ -190,6 +190,7 @@ class PsAdminTasks extends HTMLElement {
     const timerHitSound = task?.timerBonus?.hitSound || "success";
     const timerAnimation = task?.timerBonus?.animation || "none";
     const bonusCriteria = task?.bonusCriteria || [];
+    const activeDays = task?.activeDays || [];
     const assignedUsers = task?.assignedUsers || [];
     const category = task?.category || "routine";
     const payType = task?.payType || "fixed";
@@ -251,6 +252,36 @@ class PsAdminTasks extends HTMLElement {
         .user-check { display: flex; align-items: center; gap: 4px; }
         .user-check label { font-size: 0.8rem; color: var(--muted); cursor: pointer; }
         .user-check input { accent-color: var(--accent); }
+        .day-toggles {
+          display: flex;
+          gap: 4px;
+          margin-bottom: 14px;
+        }
+        .day-toggle {
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          border: 1px solid var(--border-subtle);
+          background: #0d0e16;
+          color: var(--muted);
+          font-size: 0.75rem;
+          font-weight: 600;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: background 120ms, border-color 120ms, color 120ms;
+          font-family: inherit;
+          appearance: none;
+        }
+        .day-toggle.active {
+          background: var(--accent-soft);
+          border-color: var(--accent);
+          color: var(--accent);
+        }
+        .day-toggle:hover {
+          border-color: var(--accent);
+        }
         .bonus-criterion-row {
           display: flex;
           gap: 8px;
@@ -312,6 +343,17 @@ class PsAdminTasks extends HTMLElement {
               <option value="weekly" ${recurrence === "weekly" ? "selected" : ""}>Weekly</option>
               <option value="once" ${recurrence === "once" ? "selected" : ""}>One-time</option>
             </select>
+          </div>
+
+          <div id="active-days-row" style="${recurrence === "daily" ? "" : "display:none"}">
+            <div class="form-group">
+              <label>Active Days</label>
+              <div class="day-toggles">
+                ${["S","M","T","W","T","F","S"].map((label, i) =>
+                  `<button type="button" class="day-toggle${activeDays.length === 0 || activeDays.includes(i) ? " active" : ""}" data-day="${i}">${label}</button>`
+                ).join("")}
+              </div>
+            </div>
           </div>
 
           <div class="form-group">
@@ -484,6 +526,23 @@ class PsAdminTasks extends HTMLElement {
 
     const hourlyOpts = this.shadowRoot.getElementById("hourly-options");
 
+    // Toggle active days visibility when recurrence changes
+    const recurrenceEl = this.shadowRoot.getElementById("f-recurrence");
+    const activeDaysRow = this.shadowRoot.getElementById("active-days-row");
+    if (recurrenceEl && activeDaysRow) {
+      recurrenceEl.addEventListener("change", () => {
+        activeDaysRow.style.display = recurrenceEl.value === "daily" ? "" : "none";
+      });
+    }
+
+    // Day toggle buttons
+    this.shadowRoot.querySelectorAll(".day-toggle").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        btn.classList.toggle("active");
+      });
+    });
+
     if (categoryEl && jobboardOpts) {
       categoryEl.addEventListener("change", () => {
         jobboardOpts.style.display = categoryEl.value === "jobboard" ? "" : "none";
@@ -540,6 +599,18 @@ class PsAdminTasks extends HTMLElement {
 
     if (!isPenalty) {
       data.recurrence = s.getElementById("f-recurrence").value;
+
+      // Active days (only meaningful for daily)
+      if (data.recurrence === "daily") {
+        const checked = [];
+        s.querySelectorAll(".day-toggle.active").forEach((btn) => {
+          checked.push(parseInt(btn.dataset.day));
+        });
+        data.activeDays = (checked.length === 7 || checked.length === 0) ? [] : checked.sort();
+      } else {
+        data.activeDays = [];
+      }
+
       data.category = s.getElementById("f-category").value;
       data.requiresApproval = s.getElementById("f-approval").checked;
 
