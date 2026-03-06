@@ -188,6 +188,7 @@ class PsAdminTasks extends HTMLElement {
     const timerMode = task?.timerBonus?.mode || "under";
     const timerTickSound = task?.timerBonus?.tickSound || "click";
     const timerHitSound = task?.timerBonus?.hitSound || "success";
+    const timerAnimation = task?.timerBonus?.animation || "none";
     const bonusCriteria = task?.bonusCriteria || [];
     const assignedUsers = task?.assignedUsers || [];
     const category = task?.category || "routine";
@@ -418,6 +419,16 @@ class PsAdminTasks extends HTMLElement {
               </select>
             </div>
           </div>
+          <div class="form-group">
+            <label>Timer animation</label>
+            <select id="f-timer-animation">
+              <option value="none" ${timerAnimation === "none" ? "selected" : ""}>None</option>
+              <option value="toothbrush" ${timerAnimation === "toothbrush" ? "selected" : ""}>Toothbrush</option>
+              <option value="exercise" ${timerAnimation === "exercise" ? "selected" : ""}>Exercise</option>
+              <option value="reading" ${timerAnimation === "reading" ? "selected" : ""}>Reading</option>
+              <option value="cleaning" ${timerAnimation === "cleaning" ? "selected" : ""}>Cleaning</option>
+            </select>
+          </div>
 
           <div class="section-label">Bonus Criteria (optional)</div>
           <div id="bonus-criteria-list">
@@ -561,7 +572,8 @@ class PsAdminTasks extends HTMLElement {
       const tmode = s.getElementById("f-timer-mode")?.value || "under";
       const ttick = s.getElementById("f-timer-tick")?.value || "click";
       const thit = s.getElementById("f-timer-hit")?.value || "success";
-      data.timerBonus = (tt > 0 && tm > 0) ? { targetSeconds: tt, multiplier: tm, mode: tmode, tickSound: ttick, hitSound: thit } : null;
+      const tanim = s.getElementById("f-timer-animation")?.value || "none";
+      data.timerBonus = (tt > 0 && tm > 0) ? { targetSeconds: tt, multiplier: tm, mode: tmode, tickSound: ttick, hitSound: thit, animation: tanim !== "none" ? tanim : undefined } : null;
 
       const bonusCriteria = [];
       s.querySelectorAll(".bonus-criterion-row").forEach((row) => {

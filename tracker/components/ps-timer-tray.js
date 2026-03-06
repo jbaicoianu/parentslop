@@ -80,6 +80,7 @@ class PsTimerTray extends HTMLElement {
       timerMode: task.timerBonus.mode || "under",
       tickSound: task.timerBonus.tickSound || "click",
       hitSound: task.timerBonus.hitSound || "success",
+      animation: task.timerBonus.animation || "none",
       startTime: performance.now(),
       elapsed: 0,
       targetHitPlayed: false,
@@ -360,6 +361,19 @@ class PsTimerTray extends HTMLElement {
         }
       }
 
+      // Update animation play state
+      const animEl = this.shadowRoot.getElementById("card-animation");
+      if (animEl) {
+        animEl.style.animationPlayState = timer.paused ? "paused" : "running";
+        const svgEl = animEl.querySelector(".anim-svg");
+        if (svgEl) {
+          svgEl.style.animationPlayState = timer.paused ? "paused" : "running";
+          svgEl.querySelectorAll("*").forEach(el => {
+            el.style.animationPlayState = timer.paused ? "paused" : "running";
+          });
+        }
+      }
+
       // Update pause button state
       if (pauseBtn) {
         if (timer.paused) {
@@ -486,6 +500,8 @@ class PsTimerTray extends HTMLElement {
               </div>
             </div>
 
+            ${timer.animation !== "none" ? `<div class="card-animation" id="card-animation">${this._getAnimationHtml(timer.animation)}</div>` : ""}
+
             <div id="card-status" class="card-status">${timer.timerMode === "over"
               ? `Spend at least ${this._formatTime(timer.targetSeconds)}`
               : `Finish before ${this._formatTime(timer.targetSeconds)}`}</div>
@@ -571,6 +587,47 @@ class PsTimerTray extends HTMLElement {
           this._pause(key);
         }
       });
+    }
+  }
+
+  _getAnimationHtml(key) {
+    switch (key) {
+      case "toothbrush":
+        return `<svg class="anim-svg anim-toothbrush" viewBox="0 0 120 80" fill="none">
+          <rect class="tb-handle" x="20" y="35" width="50" height="10" rx="3" fill="#8be9fd"/>
+          <rect class="tb-head" x="70" y="30" width="30" height="20" rx="4" fill="#f8f8f2"/>
+          <line x1="74" y1="33" x2="74" y2="47" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="80" y1="33" x2="80" y2="47" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="86" y1="33" x2="86" y2="47" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="92" y1="33" x2="92" y2="47" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>`;
+
+      case "exercise":
+        return `<svg class="anim-svg anim-exercise" viewBox="0 0 120 80" fill="none">
+          <circle cx="60" cy="12" r="7" fill="#f1fa8c"/>
+          <line class="ex-body" x1="60" y1="19" x2="60" y2="48" stroke="#f1fa8c" stroke-width="2.5" stroke-linecap="round"/>
+          <line class="ex-arm-l" x1="60" y1="28" x2="42" y2="18" stroke="#f1fa8c" stroke-width="2.5" stroke-linecap="round"/>
+          <line class="ex-arm-r" x1="60" y1="28" x2="78" y2="18" stroke="#f1fa8c" stroke-width="2.5" stroke-linecap="round"/>
+          <line class="ex-leg-l" x1="60" y1="48" x2="44" y2="72" stroke="#f1fa8c" stroke-width="2.5" stroke-linecap="round"/>
+          <line class="ex-leg-r" x1="60" y1="48" x2="76" y2="72" stroke="#f1fa8c" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>`;
+
+      case "reading":
+        return `<svg class="anim-svg anim-reading" viewBox="0 0 120 80" fill="none">
+          <path class="book-left" d="M60 20 L60 70 Q40 65 20 70 L20 20 Q40 15 60 20Z" fill="#bd93f9" opacity="0.7"/>
+          <path class="book-right" d="M60 20 L60 70 Q80 65 100 70 L100 20 Q80 15 60 20Z" fill="#bd93f9" opacity="0.5"/>
+          <path class="book-page" d="M60 22 L60 68 Q75 63 90 67 L90 22 Q75 17 60 22Z" fill="#f8f8f2" opacity="0.15"/>
+          <line x1="60" y1="20" x2="60" y2="70" stroke="#f8f8f2" stroke-width="1.5" opacity="0.4"/>
+        </svg>`;
+
+      case "cleaning":
+        return `<svg class="anim-svg anim-cleaning" viewBox="0 0 120 80" fill="none">
+          <line class="broom-handle" x1="60" y1="5" x2="60" y2="50" stroke="#ffb86c" stroke-width="3" stroke-linecap="round"/>
+          <path class="broom-head" d="M40 50 Q45 48 50 55 Q55 48 60 55 Q65 48 70 55 Q75 48 80 50 L78 72 Q60 68 42 72Z" fill="#ffb86c" opacity="0.8"/>
+        </svg>`;
+
+      default:
+        return "";
     }
   }
 
@@ -952,6 +1009,97 @@ class PsTimerTray extends HTMLElement {
           transform: translate(-50%, -50%) rotate(var(--angle)) translateX(var(--dist, 60px)) scale(0);
           opacity: 0;
         }
+      }
+
+      /* --- Task animations --- */
+      .card-animation {
+        position: relative;
+        height: 80px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 4px auto 8px;
+        overflow: hidden;
+      }
+
+      .anim-svg {
+        height: 70px;
+        width: auto;
+      }
+
+      /* Toothbrush — sweeps side to side */
+      .anim-toothbrush {
+        animation: toothbrushSweep 1.2s ease-in-out infinite;
+      }
+
+      @keyframes toothbrushSweep {
+        0%, 100% { transform: translateX(-14px) rotate(-5deg); }
+        50% { transform: translateX(14px) rotate(5deg); }
+      }
+
+      /* Exercise — jumping jacks */
+      .anim-exercise .ex-arm-l {
+        transform-origin: 60px 28px;
+        animation: armL 0.8s ease-in-out infinite;
+      }
+      .anim-exercise .ex-arm-r {
+        transform-origin: 60px 28px;
+        animation: armR 0.8s ease-in-out infinite;
+      }
+      .anim-exercise .ex-leg-l {
+        transform-origin: 60px 48px;
+        animation: legL 0.8s ease-in-out infinite;
+      }
+      .anim-exercise .ex-leg-r {
+        transform-origin: 60px 48px;
+        animation: legR 0.8s ease-in-out infinite;
+      }
+      .anim-exercise .ex-body {
+        animation: bodyBounce 0.8s ease-in-out infinite;
+      }
+
+      @keyframes armL {
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(60deg); }
+      }
+      @keyframes armR {
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(-60deg); }
+      }
+      @keyframes legL {
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(-20deg); }
+      }
+      @keyframes legR {
+        0%, 100% { transform: rotate(0deg); }
+        50% { transform: rotate(20deg); }
+      }
+      @keyframes bodyBounce {
+        0%, 100% { transform: translateY(0); }
+        25% { transform: translateY(-4px); }
+        75% { transform: translateY(0); }
+      }
+
+      /* Reading — page turning */
+      .anim-reading .book-page {
+        transform-origin: 60px 45px;
+        animation: pageTurn 2.5s ease-in-out infinite;
+      }
+
+      @keyframes pageTurn {
+        0%, 40% { transform: scaleX(1); opacity: 0.15; }
+        50% { transform: scaleX(0); opacity: 0.3; }
+        60%, 100% { transform: scaleX(1); opacity: 0.15; }
+      }
+
+      /* Cleaning — broom sweeping */
+      .anim-cleaning {
+        animation: broomSweep 1.4s ease-in-out infinite;
+      }
+
+      @keyframes broomSweep {
+        0%, 100% { transform: translateX(-16px) rotate(-8deg); }
+        50% { transform: translateX(16px) rotate(8deg); }
       }
     `;
   }
