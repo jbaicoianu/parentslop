@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <title>ParentSlop</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="manifest" href="/manifest.json" />
   <style>
     :root {
       color-scheme: dark;
@@ -1151,6 +1152,15 @@
         // Views will auto-update via their own bus listeners
       });
     });
+  </script>
+
+  <!-- Service Worker registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch((err) => {
+        console.warn('SW registration failed:', err);
+      });
+    }
   </script>
 </body>
 </html>

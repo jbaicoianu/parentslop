@@ -13,11 +13,22 @@ class PsNavBar extends HTMLElement {
       eventBus.on("completion:added", () => this.render()),
       eventBus.on("completion:approved", () => this.render()),
     );
+    this._onOnline = () => this._updateOfflineIndicator(false);
+    this._onOffline = () => this._updateOfflineIndicator(true);
+    window.addEventListener("online", this._onOnline);
+    window.addEventListener("offline", this._onOffline);
     this.render();
   }
 
   disconnectedCallback() {
     this._unsubs.forEach((u) => u());
+    window.removeEventListener("online", this._onOnline);
+    window.removeEventListener("offline", this._onOffline);
+  }
+
+  _updateOfflineIndicator(offline) {
+    const el = this.shadowRoot.querySelector(".offline-indicator");
+    if (el) el.style.display = offline ? "flex" : "none";
   }
 
   _getTabs() {
@@ -113,6 +124,24 @@ class PsNavBar extends HTMLElement {
           padding: 0 4px;
         }
 
+        .offline-indicator {
+          display: none;
+          align-items: center;
+          gap: 5px;
+          padding: 4px 10px;
+          font-size: 0.7rem;
+          color: #f1fa8c;
+          white-space: nowrap;
+        }
+
+        .offline-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: #f1fa8c;
+          flex-shrink: 0;
+        }
+
         @media (max-width: 520px) {
           .tab {
             padding: 10px 10px;
@@ -123,6 +152,7 @@ class PsNavBar extends HTMLElement {
           }
           .tab-icon { font-size: 1rem; }
           .tab-label { font-size: 0.62rem; }
+          .offline-indicator { font-size: 0.62rem; padding: 4px 6px; }
         }
       </style>
       <nav>
@@ -137,6 +167,10 @@ class PsNavBar extends HTMLElement {
         `
           )
           .join("")}
+        <div class="offline-indicator" style="display:${navigator.onLine ? "none" : "flex"}">
+          <span class="offline-dot"></span>
+          Offline
+        </div>
       </nav>
     `;
 

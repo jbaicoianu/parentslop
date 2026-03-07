@@ -16,6 +16,8 @@ class PsFeedbackFab extends HTMLElement {
       eventBus.on("user:changed", () => this._updateVisibility()),
       eventBus.on("nav:changed", () => this._updateVisibility()),
     );
+    this._onOnline = () => this._flushQueue();
+    window.addEventListener("online", this._onOnline);
     this.render();
     this._updateVisibility();
   }
@@ -23,6 +25,38 @@ class PsFeedbackFab extends HTMLElement {
   disconnectedCallback() {
     this._unsubs.forEach((u) => u());
     this._stopRecognition();
+    window.removeEventListener("online", this._onOnline);
+  }
+
+  static QUEUE_KEY = "parentslop.feedbackQueue";
+
+  _enqueue(payload) {
+    const queue = JSON.parse(localStorage.getItem(PsFeedbackFab.QUEUE_KEY) || "[]");
+    queue.push(payload);
+    localStorage.setItem(PsFeedbackFab.QUEUE_KEY, JSON.stringify(queue));
+  }
+
+  async _flushQueue() {
+    const queue = JSON.parse(localStorage.getItem(PsFeedbackFab.QUEUE_KEY) || "[]");
+    if (!queue.length) return;
+    const remaining = [];
+    for (const payload of queue) {
+      try {
+        const res = await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error("Server error");
+      } catch {
+        remaining.push(payload);
+      }
+    }
+    if (remaining.length) {
+      localStorage.setItem(PsFeedbackFab.QUEUE_KEY, JSON.stringify(remaining));
+    } else {
+      localStorage.removeItem(PsFeedbackFab.QUEUE_KEY);
+    }
   }
 
   _updateVisibility() {
@@ -173,8 +207,9 @@ class PsFeedbackFab extends HTMLElement {
       if (!res.ok) throw new Error("Server error");
       eventBus.emit("toast:show", { message: "Feedback saved!", type: "success" });
     } catch (e) {
-      console.error("Feedback submit failed:", e);
-      eventBus.emit("toast:show", { message: "Failed to save feedback", type: "danger" });
+      console.error("Feedback submit failed, queuing for later:", e);
+      this._enqueue(payload);
+      eventBus.emit("toast:show", { message: "Feedback saved offline — will sync later", type: "warning" });
     }
   }
 
@@ -337,11 +372,10 @@ class PsFeedbackFab extends HTMLElement {
 
     const fab = this.shadowRoot.querySelector(".fab");
 
-    // Tap vs long-press detection
+    // Long-press for voice, normal tap/click for text
     let longPressTriggered = false;
 
-    fab.addEventListener("pointerdown", (e) => {
-      e.preventDefault(); // keep pointer sequence alive on touch
+    fab.addEventListener("pointerdown", () => {
       longPressTriggered = false;
       this._pressTimer = setTimeout(() => {
         longPressTriggered = true;
@@ -349,14 +383,12 @@ class PsFeedbackFab extends HTMLElement {
       }, 500);
     });
 
-    fab.addEventListener("pointerup", () => {
-      clearTimeout(this._pressTimer);
+    fab.addEventListener("pointerup", () => clearTimeout(this._pressTimer));
+    fab.addEventListener("pointercancel", () => clearTimeout(this._pressTimer));
+
+    fab.addEventListener("click", () => {
       if (longPressTriggered) return;
       this._openModal(false);
-    });
-
-    fab.addEventListener("pointercancel", () => {
-      clearTimeout(this._pressTimer);
     });
 
     // Prevent context menu on long press (mobile)
