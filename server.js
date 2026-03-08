@@ -1,6 +1,7 @@
 const express = require("express");
 const Database = require("better-sqlite3");
 const path = require("path");
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -116,8 +117,101 @@ app.patch("/api/feedback/:id", (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Backups -----------------------------------------------------------------
+
+const BACKUP_DIR = path.join(__dirname, "backups");
+fs.mkdirSync(BACKUP_DIR, { recursive: true });
+
+async function createBackup() {
+  const timestamp = new Date().toISOString().replace(/:/g, "-").replace(/\.\d+Z$/, "");
+  const filename = `parentslop-${timestamp}.db`;
+  const dest = path.join(BACKUP_DIR, filename);
+  await db.backup(dest);
+  try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch (e) { console.warn("WAL checkpoint warning:", e.message); }
+  rotateBackups();
+  console.log(`Backup created: ${filename}`);
+  return filename;
+}
+
+function rotateBackups() {
+  const files = fs.readdirSync(BACKUP_DIR)
+    .filter(f => f.startsWith("parentslop-") && f.endsWith(".db"))
+    .map(f => ({ name: f, time: fs.statSync(path.join(BACKUP_DIR, f)).mtime }))
+    .sort((a, b) => b.time - a.time); // newest first
+
+  const now = new Date();
+  const msPerDay = 86400000;
+  const keep = new Set();
+
+  // Keep all backups from the last 7 days
+  for (const f of files) {
+    if (now - f.time < 7 * msPerDay) keep.add(f.name);
+  }
+
+  // Keep the most recent backup from each of the prior 4 calendar weeks
+  const weeksKept = new Set();
+  for (const f of files) {
+    if (keep.has(f.name)) continue;
+    const age = now - f.time;
+    if (age >= 7 * msPerDay && age < 35 * msPerDay) {
+      // Get ISO week identifier
+      const d = new Date(f.time);
+      const jan1 = new Date(d.getFullYear(), 0, 1);
+      const weekNum = Math.ceil(((d - jan1) / msPerDay + jan1.getDay() + 1) / 7);
+      const weekKey = `${d.getFullYear()}-W${weekNum}`;
+      if (!weeksKept.has(weekKey)) {
+        weeksKept.add(weekKey);
+        keep.add(f.name);
+        if (weeksKept.size >= 4) break;
+      }
+    }
+  }
+
+  // Delete everything not in the keep set
+  for (const f of files) {
+    if (!keep.has(f.name)) {
+      fs.unlinkSync(path.join(BACKUP_DIR, f.name));
+      console.log(`Backup rotated out: ${f.name}`);
+    }
+  }
+}
+
+function listBackups() {
+  if (!fs.existsSync(BACKUP_DIR)) return [];
+  return fs.readdirSync(BACKUP_DIR)
+    .filter(f => f.startsWith("parentslop-") && f.endsWith(".db"))
+    .map(f => {
+      const stat = fs.statSync(path.join(BACKUP_DIR, f));
+      return { filename: f, size: stat.size, created: stat.mtime.toISOString() };
+    })
+    .sort((a, b) => b.created.localeCompare(a.created));
+}
+
+// POST /api/backup — trigger a backup
+app.post("/api/backup", async (req, res) => {
+  try {
+    const filename = await createBackup();
+    res.json({ ok: true, filename });
+  } catch (err) {
+    console.error("Backup failed:", err);
+    res.status(500).json({ error: "backup failed", message: err.message });
+  }
+});
+
+// GET /api/backups — list existing backups
+app.get("/api/backups", (req, res) => {
+  res.json(listBackups());
+});
+
+// Schedule backup every 6 hours
+setInterval(() => {
+  createBackup().catch(err => console.error("Scheduled backup failed:", err));
+}, 6 * 60 * 60 * 1000);
+
 // --- Start -------------------------------------------------------------------
 
 app.listen(PORT, () => {
   console.log(`ParentSlop server running on http://localhost:${PORT}`);
+  // Run initial backup on startup
+  createBackup().catch(err => console.error("Startup backup failed:", err));
 });

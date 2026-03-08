@@ -428,6 +428,12 @@
                   <button class="data-btn" id="import-btn">Import Data</button>
                   <input type="file" id="import-file" accept=".json" hidden />
                 </div>
+                <div class="data-panel" style="margin-top:12px;">
+                  <h3>Database Backups</h3>
+                  <p style="font-size:0.82rem; color:#a0a4be; margin:0 0 14px;">Automatic SQLite backups run every 6 hours. You can also create one manually.</p>
+                  <button class="data-btn" id="backup-btn">Create Backup</button>
+                  <div id="backup-list" style="margin-top:14px;"></div>
+                </div>
               </div>
             </div>
           </div>
@@ -1139,6 +1145,72 @@
         };
         reader.readAsText(file);
         importFile.value = "";
+      });
+
+      // ---- Database backups ----
+      const backupBtn = document.getElementById("backup-btn");
+      const backupList = document.getElementById("backup-list");
+
+      function formatBytes(bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+        return (bytes / 1048576).toFixed(1) + " MB";
+      }
+
+      async function refreshBackupList() {
+        try {
+          const res = await fetch("/api/backups");
+          const backups = await res.json();
+          if (backups.length === 0) {
+            backupList.innerHTML = '<p style="font-size:0.8rem; color:#a0a4be; opacity:0.7;">No backups yet.</p>';
+            return;
+          }
+          backupList.innerHTML = `
+            <table style="width:100%; border-collapse:collapse; font-size:0.8rem;">
+              <thead>
+                <tr style="color:#a0a4be; text-align:left;">
+                  <th style="padding:4px 8px; border-bottom:1px solid #25273a;">Filename</th>
+                  <th style="padding:4px 8px; border-bottom:1px solid #25273a;">Date</th>
+                  <th style="padding:4px 8px; border-bottom:1px solid #25273a; text-align:right;">Size</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${backups.map(b => `
+                  <tr style="color:#ccc;">
+                    <td style="padding:4px 8px; border-bottom:1px solid #1a1b2a; font-family:monospace; font-size:0.72rem;">${b.filename}</td>
+                    <td style="padding:4px 8px; border-bottom:1px solid #1a1b2a;">${new Date(b.created).toLocaleString()}</td>
+                    <td style="padding:4px 8px; border-bottom:1px solid #1a1b2a; text-align:right;">${formatBytes(b.size)}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>`;
+        } catch (err) {
+          backupList.innerHTML = '<p style="font-size:0.8rem; color:#ff6b81;">Failed to load backups.</p>';
+        }
+      }
+
+      backupBtn?.addEventListener("click", async () => {
+        backupBtn.disabled = true;
+        backupBtn.textContent = "Creating...";
+        try {
+          const res = await fetch("/api/backup", { method: "POST" });
+          const data = await res.json();
+          if (data.ok) {
+            eventBus.emit("toast:show", { message: `Backup created: ${data.filename}`, type: "success" });
+            refreshBackupList();
+          } else {
+            eventBus.emit("toast:show", { message: "Backup failed", type: "danger" });
+          }
+        } catch (err) {
+          eventBus.emit("toast:show", { message: "Backup failed", type: "danger" });
+        }
+        backupBtn.disabled = false;
+        backupBtn.textContent = "Create Backup";
+      });
+
+      // Load backup list when Data tab is shown
+      adminSubnav.querySelector('[data-admin-tab="data"]')?.addEventListener("click", () => {
+        refreshBackupList();
       });
 
       // ---- Data import event ----

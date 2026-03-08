@@ -926,7 +926,16 @@ class PsDashboard extends HTMLElement {
           transform: scale(1.05);
         }
         .streak-badge.bonus-active {
+          position: relative;
+        }
+        .streak-badge.bonus-active::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          box-shadow: 0 0 14px var(--glow-color, rgba(255, 200, 50, 0.35)), 0 0 4px var(--glow-color, rgba(255, 200, 50, 0.2));
           animation: streakGlow 2s ease-in-out infinite;
+          pointer-events: none;
         }
         .streak-shield {
           position: relative;
@@ -992,8 +1001,8 @@ class PsDashboard extends HTMLElement {
           display: inline-block;
         }
         @keyframes streakGlow {
-          0%, 100% { box-shadow: 0 0 4px var(--glow-color, rgba(255, 200, 50, 0.15)); }
-          50% { box-shadow: 0 0 14px var(--glow-color, rgba(255, 200, 50, 0.35)), 0 0 4px var(--glow-color, rgba(255, 200, 50, 0.2)); }
+          0%, 100% { opacity: 0.3; }
+          50% { opacity: 1; }
         }
 
         /* Celebration animation */
