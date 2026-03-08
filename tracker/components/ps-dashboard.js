@@ -150,7 +150,9 @@ class PsDashboard extends HTMLElement {
       if (t.recurrence === "daily" && !tracker.isTaskScheduledToday(t)) continue;
 
       const isDone =
-        t.recurrence === "weekly"
+        t.recurrence === "transient"
+          ? tracker.isTaskCompletedSinceActivation(t.id, user.id)
+          : t.recurrence === "weekly"
           ? tracker.isTaskCompletedThisWeek(t.id, user.id)
           : t.recurrence === "daily"
           ? tracker.isTaskCompletedToday(t.id, user.id)
@@ -1953,6 +1955,7 @@ class PsDashboard extends HTMLElement {
       // Step 5: Check if all routine tasks are now done
       const allRoutineTasks = tracker.getTasksForUser(userId).filter((t) => t.category !== "jobboard");
       const allRoutineDone = allRoutineTasks.every((t) => {
+        if (t.recurrence === "transient") return tracker.isTaskCompletedSinceActivation(t.id, userId);
         if (t.recurrence === "weekly") return tracker.isTaskCompletedThisWeek(t.id, userId);
         return tracker.isTaskCompletedToday(t.id, userId);
       });

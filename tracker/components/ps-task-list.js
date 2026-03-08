@@ -22,6 +22,9 @@ class PsTaskList extends HTMLElement {
   }
 
   _getStatus(task, userId) {
+    if (task.recurrence === "transient") {
+      return tracker.isTaskCompletedSinceActivation(task.id, userId) ? "done" : "open";
+    }
     if (task.recurrence === "weekly") {
       return tracker.isTaskCompletedThisWeek(task.id, userId) ? "done" : "open";
     }

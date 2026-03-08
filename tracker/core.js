@@ -216,6 +216,7 @@ function weekKey(iso) {
 function calcStreak(taskId, userId) {
   const task = taskStore.data.find((t) => t.id === taskId);
   if (!task) return 0;
+  if (task.recurrence === "transient") return 0;
 
   const completions = completionStore.data
     .filter((c) => c.taskId === taskId && c.userId === userId && c.status === "approved")
@@ -485,7 +486,9 @@ function createTask(data) {
     id: uid(),
     name: data.name || "New Task",
     description: data.description || "",
-    recurrence: data.recurrence || "daily", // daily | weekly | once
+    recurrence: data.recurrence || "daily", // daily | weekly | once | transient
+    available: data.available ?? (data.recurrence === "transient" ? false : true),
+    lastActivatedAt: data.lastActivatedAt || null,
     assignedUsers: data.assignedUsers || [], // empty = all
     requiresApproval: data.requiresApproval ?? false,
     isPenalty: data.isPenalty ?? false,
@@ -559,6 +562,42 @@ function getRecentPenalties(userId, days = 7) {
   ).sort((a, b) => b.completedAt.localeCompare(a.completedAt));
 }
 
+// --- Transient task helpers --------------------------------------------------
+
+function isTaskCompletedSinceActivation(taskId, userId) {
+  const task = taskStore.data.find((t) => t.id === taskId);
+  if (!task || !task.lastActivatedAt) return false;
+  return completionStore.data.some(
+    (c) => c.taskId === taskId && c.userId === userId && c.status !== "rejected" && c.completedAt >= task.lastActivatedAt
+  );
+}
+
+function activateTransientTask(taskId) {
+  const task = taskStore.data.find((t) => t.id === taskId);
+  if (!task) return null;
+  task.available = true;
+  task.lastActivatedAt = now();
+  taskStore.save();
+  // Clear old job claims so the task appears fresh on the board
+  const oldClaims = jobClaimStore.data.filter((c) => c.taskId === taskId);
+  if (oldClaims.length > 0) {
+    jobClaimStore.data = jobClaimStore.data.filter((c) => c.taskId !== taskId);
+    jobClaimStore.save();
+    bus.emit("jobclaims:changed");
+  }
+  bus.emit("tasks:changed");
+  return task;
+}
+
+function deactivateTransientTask(taskId) {
+  const task = taskStore.data.find((t) => t.id === taskId);
+  if (!task) return null;
+  task.available = false;
+  taskStore.save();
+  bus.emit("tasks:changed");
+  return task;
+}
+
 // --- Current user helper -----------------------------------------------------
 
 function getCurrentUser() {
@@ -612,6 +651,7 @@ function getTasksForUser(userId) {
   const tasks = taskStore.data.filter((t) => {
     if (t.archived) return false;
     if (t.isPenalty) return false;
+    if (t.recurrence === "transient" && !t.available) return false;
     if (t.assignedUsers.length > 0 && !t.assignedUsers.includes(userId)) return false;
     return true;
   });
@@ -1205,7 +1245,10 @@ window.tracker = {
   getTasksForUser,
   isTaskCompletedToday,
   isTaskCompletedThisWeek,
+  isTaskCompletedSinceActivation,
   isTaskScheduledToday,
+  activateTransientTask,
+  deactivateTransientTask,
   resetDailyTasks,
   getRecentPenalties,
   migrateUsers,

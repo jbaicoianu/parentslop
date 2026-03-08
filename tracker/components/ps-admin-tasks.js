@@ -68,7 +68,7 @@ class PsAdminTasks extends HTMLElement {
           ${tasks.filter(t => !t.isPenalty).map((t) => `
             <div class="task-item">
               <div class="task-item-info">
-                <div class="task-item-name">${t.name}</div>
+                <div class="task-item-name">${t.name}${t.recurrence === "transient" ? (t.available ? ' <span style="color:var(--success);font-size:0.72rem;font-weight:600">● active</span>' : ' <span style="color:var(--muted);font-size:0.72rem">○ inactive</span>') : ""}</div>
                 <div class="task-item-meta">
                   ${t.recurrence}${t.activeDays?.length ? " (" + t.activeDays.map(d => ["Su","Mo","Tu","We","Th","Fr","Sa"][d]).join(",") + ")" : ""} · ${t.category === "jobboard" ? "job board" : "routine"} · ${this._rewardText(t)}
                   ${t.payType === "hourly" ? "· hourly" : ""}
@@ -80,6 +80,10 @@ class PsAdminTasks extends HTMLElement {
                   ${t.bonusCriteria?.length ? `· ${t.bonusCriteria.length} bonus criteria` : ""}
                 </div>
               </div>
+              ${t.recurrence === "transient" ? (t.available
+                ? `<button class="btn btn-sm btn-ghost" data-deactivate="${t.id}" style="color:var(--warning)">Deactivate</button>`
+                : `<button class="btn btn-sm btn-success" data-activate="${t.id}">Activate</button>`
+              ) : ""}
               <button class="btn btn-sm btn-ghost" data-edit="${t.id}">Edit</button>
               <button class="btn btn-sm btn-ghost" data-archive="${t.id}" style="color:var(--danger)">×</button>
             </div>
@@ -123,6 +127,20 @@ class PsAdminTasks extends HTMLElement {
 
     this.shadowRoot.querySelectorAll("[data-edit]").forEach((btn) => {
       btn.addEventListener("click", () => this._showForm(btn.dataset.edit));
+    });
+
+    this.shadowRoot.querySelectorAll("[data-activate]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        tracker.activateTransientTask(btn.dataset.activate);
+        eventBus.emit("toast:show", { message: "Task activated!", type: "success" });
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-deactivate]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        tracker.deactivateTransientTask(btn.dataset.deactivate);
+        eventBus.emit("toast:show", { message: "Task deactivated.", type: "warning" });
+      });
     });
 
     this.shadowRoot.querySelectorAll("[data-archive]").forEach((btn) => {
@@ -342,6 +360,7 @@ class PsAdminTasks extends HTMLElement {
               <option value="daily" ${recurrence === "daily" ? "selected" : ""}>Daily</option>
               <option value="weekly" ${recurrence === "weekly" ? "selected" : ""}>Weekly</option>
               <option value="once" ${recurrence === "once" ? "selected" : ""}>One-time</option>
+              <option value="transient" ${recurrence === "transient" ? "selected" : ""}>Transient (on-demand)</option>
             </select>
           </div>
 
@@ -599,6 +618,12 @@ class PsAdminTasks extends HTMLElement {
 
     if (!isPenalty) {
       data.recurrence = s.getElementById("f-recurrence").value;
+
+      // When converting an existing task to transient, auto-activate it
+      if (data.recurrence === "transient" && task && task.recurrence !== "transient") {
+        data.available = true;
+        data.lastActivatedAt = tracker.now();
+      }
 
       // Active days (only meaningful for daily)
       if (data.recurrence === "daily") {
