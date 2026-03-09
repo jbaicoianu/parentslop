@@ -141,6 +141,8 @@ function migrateUsers() {
   let changed = false;
   for (const u of users) {
     if (u.isAdmin === undefined) { u.isAdmin = false; changed = true; }
+    if (!u.role) { u.role = u.isAdmin ? "parent" : "kid"; changed = true; }
+    u.isAdmin = (u.role === "parent");
     if (!u.balances) { u.balances = {}; changed = true; }
     if (!u.tags) { u.tags = []; changed = true; }
   }
@@ -618,7 +620,7 @@ function getCurrentUser() {
 
 function isCurrentUserAdmin() {
   const u = getCurrentUser();
-  return u ? u.isAdmin === true : false;
+  return u ? u.role === "parent" : false;
 }
 
 // --- Data export / import ----------------------------------------------------

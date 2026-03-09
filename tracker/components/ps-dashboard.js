@@ -1527,7 +1527,7 @@ class PsDashboard extends HTMLElement {
           }).join("")}
         ` : `
           <div class="empty-state">
-            <strong>No tasks yet.</strong> An admin can create tasks in the Admin panel.
+            <strong>No tasks yet.</strong> A parent can create tasks in the Admin panel.
           </div>
         `}
 

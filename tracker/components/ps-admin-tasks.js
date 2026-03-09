@@ -509,7 +509,7 @@ class PsAdminTasks extends HTMLElement {
 
           <div class="section-label">Assign to users (empty = all)</div>
           <div class="user-checkboxes">
-            ${users.filter(u => !u.isAdmin).map((u) => `
+            ${users.filter(u => u.role !== "parent").map((u) => `
               <div class="user-check">
                 <input type="checkbox" id="u-${u.id}" data-user-id="${u.id}" ${assignedUsers.includes(u.id) ? "checked" : ""} />
                 <label for="u-${u.id}">${u.name}</label>

@@ -106,7 +106,7 @@ class PsBalanceBar extends HTMLElement {
         }
       </style>
       <div class="bar">
-        <div class="user-name">${user.name}${user.isAdmin ? " ⚙" : ""}</div>
+        <div class="user-name">${user.name}${user.role === "parent" ? " ⚙" : user.role === "pet" ? " 🐾" : ""}</div>
         ${balances
           .map(
             (b) => `

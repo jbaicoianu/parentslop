@@ -99,44 +99,51 @@ class PsAuthScreen extends HTMLElement {
           font-size: 0.8rem;
           color: var(--muted);
         }
-        .member-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-          gap: 10px;
+        .member-list {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
         }
-        .member-card {
-          border-radius: var(--radius-lg);
-          padding: 16px 14px;
+        .member-row {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 12px;
+          border-radius: 12px;
           background: linear-gradient(145deg, #181926, #10111b);
           border: 1px solid rgba(255, 255, 255, 0.03);
           cursor: pointer;
-          text-align: center;
-          transition: transform var(--transition-fast), border-color var(--transition-fast);
+          transition: background 160ms ease-out, border-color 160ms ease-out;
         }
-        .member-card:hover {
-          transform: translateY(-2px);
+        .member-row:hover {
           border-color: var(--accent-soft);
+          background: linear-gradient(145deg, #1c1e30, #141524);
         }
         .member-avatar {
-          width: 48px; height: 48px;
-          border-radius: 16px;
+          width: 28px; height: 28px;
+          border-radius: 8px;
           background: radial-gradient(circle at 30% 0%, #ffffff20, #66d9ef40);
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 1.3rem;
+          font-size: 0.8rem;
           font-weight: 600;
           color: var(--accent);
-          margin: 0 auto 8px;
+          flex-shrink: 0;
         }
         .member-name {
-          font-size: 0.9rem;
+          font-size: 0.88rem;
           font-weight: 600;
+          flex: 1;
+          min-width: 0;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
         .member-role {
           font-size: 0.68rem;
           color: var(--muted);
-          margin-top: 2px;
+          flex-shrink: 0;
         }
         .pin-input {
           display: flex;
@@ -231,13 +238,13 @@ class PsAuthScreen extends HTMLElement {
     return `
       <button class="back-link" data-action="go-choose">&larr; Back</button>
       <h2>Create Your Family</h2>
-      <p>Set up a family account. You'll be the admin.</p>
+      <p>Set up a family account. You'll be the parent.</p>
       <div class="form-group">
         <label>Family Name</label>
         <input type="text" id="reg-family" placeholder="e.g. The Smiths" autofocus />
       </div>
       <div class="form-group">
-        <label>Your Name (Admin)</label>
+        <label>Your Name (Parent)</label>
         <input type="text" id="reg-name" placeholder="e.g. Mom, Dad" />
       </div>
       <div class="form-group">
@@ -289,14 +296,24 @@ class PsAuthScreen extends HTMLElement {
     return `
       <h2>${this._family?.name || "Family"}</h2>
       <p>Who's using ParentSlop?</p>
-      <div class="member-grid">
-        ${this._members.map((m) => `
-          <div class="member-card" data-member-id="${m.id}">
+      <div class="member-list">
+        ${[...this._members].sort((a, b) => {
+          const roleOrder = { parent: 0, kid: 1, pet: 2 };
+          const rA = a.isAdmin ? "parent" : (trackerStore.users.data.find(u => u.id === a.id)?.role || "kid");
+          const rB = b.isAdmin ? "parent" : (trackerStore.users.data.find(u => u.id === b.id)?.role || "kid");
+          const orderDiff = (roleOrder[rA] ?? 1) - (roleOrder[rB] ?? 1);
+          if (orderDiff !== 0) return orderDiff;
+          return (a.displayName || "").localeCompare(b.displayName || "");
+        }).map((m) => {
+          const role = m.isAdmin ? "Parent" : (trackerStore.users.data.find(u => u.id === m.id)?.role === "pet" ? "Pet" : "Kid");
+          const icon = m.isAdmin ? "⚙" : (role === "Pet" ? "🐾" : "");
+          return `
+          <div class="member-row" data-member-id="${m.id}">
             <div class="member-avatar">${(m.displayName || "?").charAt(0).toUpperCase()}</div>
-            <div class="member-name">${m.displayName}</div>
-            <div class="member-role">${m.isAdmin ? "Admin" : "Kid"}</div>
+            <div class="member-name">${m.displayName}${icon ? " " + icon : ""}</div>
+            <div class="member-role">${role}</div>
           </div>
-        `).join("")}
+        `}).join("")}
       </div>
       <button class="logout-link" data-action="logout">Log out of this family</button>
     `;

@@ -142,7 +142,7 @@ class PsAdminUsers extends HTMLElement {
               <div class="user-header">
                 <div class="user-avatar">${initial}</div>
                 <div class="user-name">${u.name}</div>
-                <span class="user-role">${u.isAdmin ? "Admin" : "Kid"}</span>
+                <span class="user-role">${u.role === "parent" ? "Parent" : u.role === "pet" ? "Pet" : "Kid"}</span>
               </div>
               <div class="balances">
                 ${currencies.map((c) => `
@@ -159,13 +159,15 @@ class PsAdminUsers extends HTMLElement {
                 <button class="tag-add-btn" data-add-tag="${u.id}" title="Add tag">+</button>
               </div>
               <div class="user-actions">
-                <button class="btn btn-sm btn-ghost" data-toggle-admin="${u.id}">
-                  ${u.isAdmin ? "Remove Admin" : "Make Admin"}
-                </button>
+                <select class="role-select" data-role-select="${u.id}" style="background:#0d0e16;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);padding:5px 8px;font-size:0.78rem;color:var(--text);font-family:inherit;cursor:pointer;">
+                  <option value="parent" ${u.role === "parent" ? "selected" : ""}>Parent</option>
+                  <option value="kid" ${u.role === "kid" ? "selected" : ""}>Kid</option>
+                  <option value="pet" ${u.role === "pet" ? "selected" : ""}>Pet</option>
+                </select>
                 <button class="btn btn-sm btn-ghost" data-adjust="${u.id}">Adjust Balance</button>
                 <button class="btn btn-sm btn-ghost" data-reset-daily="${u.id}">Reset Daily Tasks</button>
                 <button class="btn btn-sm btn-ghost" data-rename="${u.id}">Rename</button>
-                ${!u.isAdmin ? `<button class="btn btn-sm btn-ghost" data-delete="${u.id}" style="color:var(--danger)">Delete</button>` : ""}
+                ${u.role !== "parent" ? `<button class="btn btn-sm btn-ghost" data-delete="${u.id}" style="color:var(--danger)">Delete</button>` : ""}
               </div>
             </div>
           `;
@@ -193,6 +195,7 @@ class PsAdminUsers extends HTMLElement {
           id: memberId,
           name: name.trim(),
           isAdmin: false,
+          role: "kid",
           balances: {},
           tags: [],
           createdAt: tracker.now(),
@@ -206,6 +209,7 @@ class PsAdminUsers extends HTMLElement {
           id: tracker.uid(),
           name: name.trim(),
           isAdmin: false,
+          role: "kid",
           balances: {},
           tags: [],
           createdAt: tracker.now(),
@@ -215,18 +219,31 @@ class PsAdminUsers extends HTMLElement {
       }
     });
 
-    this.shadowRoot.querySelectorAll("[data-toggle-admin]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const u = trackerStore.users.data.find((x) => x.id === btn.dataset.toggleAdmin);
+    this.shadowRoot.querySelectorAll("[data-role-select]").forEach((sel) => {
+      sel.addEventListener("change", async () => {
+        const u = trackerStore.users.data.find((x) => x.id === sel.dataset.roleSelect);
         if (!u) return;
-        // Don't let last admin remove their own admin
-        const adminCount = trackerStore.users.data.filter((x) => x.isAdmin).length;
-        if (u.isAdmin && adminCount <= 1) {
-          alert("Can't remove the last admin.");
-          return;
+        const newRole = sel.value;
+        // Don't let last parent lose parent role
+        if (u.role === "parent" && newRole !== "parent") {
+          const parentCount = trackerStore.users.data.filter((x) => x.role === "parent").length;
+          if (parentCount <= 1) {
+            alert("Can't remove the last parent.");
+            sel.value = u.role;
+            return;
+          }
         }
-        u.isAdmin = !u.isAdmin;
+        u.role = newRole;
+        u.isAdmin = (newRole === "parent");
         trackerStore.users.save();
+        // Sync isAdmin to server auth system
+        try {
+          await fetch(`/api/auth/member/${encodeURIComponent(u.id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ isAdmin: u.isAdmin }),
+          });
+        } catch (e) { /* best-effort */ }
         this.render();
       });
     });

@@ -168,7 +168,7 @@ class PsAdminSecurity extends HTMLElement {
           <div class="section-title">Member Credentials</div>
           ${members.map((m) => `
             <div class="member-row">
-              <div class="member-name">${m.displayName} ${m.isAdmin ? "(Admin)" : ""}</div>
+              <div class="member-name">${m.displayName} ${m.isAdmin ? "(Parent)" : ""}</div>
               ${authLevel === "pin" ? `
                 <span class="cred-status ${m.hasPin ? "cred-set" : "cred-unset"}">${m.hasPin ? "PIN set" : "No PIN"}</span>
                 <button class="btn btn-sm btn-ghost" data-set-pin="${m.id}">${m.hasPin ? "Change" : "Set"} PIN</button>

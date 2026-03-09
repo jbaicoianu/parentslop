@@ -367,6 +367,19 @@ app.post("/api/auth/add-member", requireFamilyAuth, requireAdmin, (req, res) => 
   res.json({ ok: true, id, displayName: displayName.trim() });
 });
 
+// PATCH /api/auth/member/:id — admin-only: update member properties (isAdmin)
+app.patch("/api/auth/member/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+  const memberId = req.params.id;
+  const member = db.prepare("SELECT * FROM family_members WHERE id = ? AND family_id = ?").get(memberId, req.familyId);
+  if (!member) return res.status(404).json({ error: "member not found" });
+
+  if (req.body.isAdmin !== undefined) {
+    db.prepare("UPDATE family_members SET is_admin = ? WHERE id = ? AND family_id = ?").run(req.body.isAdmin ? 1 : 0, memberId, req.familyId);
+  }
+
+  res.json({ ok: true });
+});
+
 // POST /api/auth/set-auth-level — admin-only: update family auth_level
 app.post("/api/auth/set-auth-level", requireFamilyAuth, requireAdmin, (req, res) => {
   const { authLevel } = req.body;
