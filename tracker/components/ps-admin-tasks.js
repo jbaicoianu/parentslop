@@ -620,6 +620,7 @@ class PsAdminTasks extends HTMLElement {
       data.recurrence = s.getElementById("f-recurrence").value;
 
       // When converting an existing task to transient, auto-activate it
+      const task = this._editing !== "new" ? trackerStore.tasks.data.find((t) => t.id === this._editing) : null;
       if (data.recurrence === "transient" && task && task.recurrence !== "transient") {
         data.available = true;
         data.lastActivatedAt = tracker.now();
