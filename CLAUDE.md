@@ -15,9 +15,10 @@ node server.js        # starts on port 3000
 ## Architecture
 
 - `server.js` — Express server, SQLite via better-sqlite3, serves static files + REST API
-- `tracker/core.js` — Client-side business logic, stores (localStorage + server sync), shared CSS
-- `tracker/components/ps-*.js` — Web Components (shadow DOM, no framework)
-- `index.html` — Shell, navigation, admin tab system
+- `static/` — All client-facing files (HTML, JS, CSS, games) served via `express.static`
+- `static/tracker/core.js` — Client-side business logic, stores (localStorage + server sync), shared CSS
+- `static/tracker/components/ps-*.js` — Web Components (shadow DOM, no framework)
+- `static/index.html` — Shell, navigation, admin tab system
 - All state is in `trackerStore.*` (localStorage-backed stores synced to server)
 - Event-driven: `eventBus.emit()`/`eventBus.on()` for cross-component communication
 

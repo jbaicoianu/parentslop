@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const cookieParser = require("cookie-parser");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -22,6 +23,7 @@ db.exec(`
 db.exec(`
   CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY,
+    family_id TEXT,
     text TEXT NOT NULL,
     user_id TEXT,
     user_name TEXT,
@@ -43,6 +45,11 @@ try {
   db.prepare("SELECT resolution_note FROM feedback LIMIT 1").get();
 } catch {
   db.exec("ALTER TABLE feedback ADD COLUMN resolution_note TEXT");
+}
+try {
+  db.prepare("SELECT family_id FROM feedback LIMIT 1").get();
+} catch {
+  db.exec("ALTER TABLE feedback ADD COLUMN family_id TEXT");
 }
 
 // --- Auth tables -------------------------------------------------------------
@@ -149,11 +156,37 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// --- Rate limiting -----------------------------------------------------------
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many login attempts, try again later" },
+});
+
+const pinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many PIN attempts, try again later" },
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many registration attempts, try again later" },
+});
+
 // --- Middleware ---------------------------------------------------------------
 
 app.use(express.json({ limit: "5mb" }));
 app.use(cookieParser());
-app.use(express.static(__dirname));
+app.use(express.static(path.join(__dirname, "static")));
 
 // --- Routes ------------------------------------------------------------------
 
@@ -206,17 +239,23 @@ function setCookie(res, sessionId) {
   res.cookie("session", sessionId, {
     httpOnly: true,
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     maxAge: SESSION_DURATION_MS,
     path: "/",
   });
 }
 
 // POST /api/auth/register — create family + admin member + session
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", registerLimiter, async (req, res) => {
   try {
     const { familyName, adminName, password } = req.body;
-    if (!familyName?.trim() || !adminName?.trim() || !password) {
+    if (!familyName || typeof familyName !== "string" || !familyName.trim() ||
+        !adminName || typeof adminName !== "string" || !adminName.trim() ||
+        !password || typeof password !== "string") {
       return res.status(400).json({ error: "familyName, adminName, and password are required" });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: "password must be at least 8 characters" });
     }
 
     const slug = slugify(familyName.trim());
@@ -245,10 +284,11 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 // POST /api/auth/login — verify family password, create session
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", loginLimiter, async (req, res) => {
   try {
     const { familyName, password } = req.body;
-    if (!familyName?.trim() || !password) {
+    if (!familyName || typeof familyName !== "string" || !familyName.trim() ||
+        !password || typeof password !== "string") {
       return res.status(400).json({ error: "familyName and password are required" });
     }
 
@@ -309,7 +349,7 @@ app.get("/api/auth/me", (req, res) => {
 });
 
 // POST /api/auth/select-member — set member in session
-app.post("/api/auth/select-member", requireFamilyAuth, async (req, res) => {
+app.post("/api/auth/select-member", pinLimiter, requireFamilyAuth, async (req, res) => {
   try {
     const { memberId, pin, password } = req.body;
     if (!memberId) return res.status(400).json({ error: "memberId required" });
@@ -358,7 +398,7 @@ app.post("/api/auth/logout", (req, res) => {
 // POST /api/auth/add-member — admin-only: add family member
 app.post("/api/auth/add-member", requireFamilyAuth, requireAdmin, (req, res) => {
   const { displayName, isAdmin } = req.body;
-  if (!displayName?.trim()) return res.status(400).json({ error: "displayName required" });
+  if (!displayName || typeof displayName !== "string" || !displayName.trim()) return res.status(400).json({ error: "displayName required" });
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -410,6 +450,9 @@ app.post("/api/auth/set-pin", requireFamilyAuth, async (req, res) => {
       // Clear PIN
       db.prepare("UPDATE family_members SET pin_hash = NULL, salt = NULL WHERE id = ?").run(targetId);
     } else {
+      if (!/^\d{4}$/.test(pin)) {
+        return res.status(400).json({ error: "PIN must be exactly 4 digits" });
+      }
       const { hash, salt } = await hashPassword(pin);
       db.prepare("UPDATE family_members SET pin_hash = ?, salt = ? WHERE id = ?").run(hash, salt, targetId);
     }
@@ -440,6 +483,7 @@ app.post("/api/auth/set-password", requireFamilyAuth, async (req, res) => {
     if (!password) {
       db.prepare("UPDATE family_members SET password_hash = NULL WHERE id = ?").run(targetId);
     } else {
+      if (typeof password !== "string") return res.status(400).json({ error: "password must be a string" });
       const { hash, salt } = await hashPassword(password);
       db.prepare("UPDATE family_members SET password_hash = ?, salt = ? WHERE id = ?").run(hash, salt, targetId);
     }
@@ -464,10 +508,16 @@ app.post("/api/auth/change-family-password", requireFamilyAuth, async (req, res)
     }
 
     const { newPassword } = req.body;
-    if (!newPassword) return res.status(400).json({ error: "newPassword required" });
+    if (!newPassword || typeof newPassword !== "string") return res.status(400).json({ error: "newPassword required" });
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: "password must be at least 8 characters" });
+    }
 
     const { hash, salt } = await hashPassword(newPassword);
     db.prepare("UPDATE families SET password_hash = ?, salt = ?, needs_password_reset = 0 WHERE id = ?").run(hash, salt, req.familyId);
+
+    // Invalidate all other sessions for this family
+    db.prepare("DELETE FROM sessions WHERE family_id = ? AND id != ?").run(req.familyId, req.sessionId);
 
     res.json({ ok: true });
   } catch (err) {
@@ -481,18 +531,18 @@ app.post("/api/auth/change-family-password", requireFamilyAuth, async (req, res)
 // POST /api/feedback — submit feedback
 app.post("/api/feedback", requireFamilyAuth, (req, res) => {
   const { text, userId, userName, currentView, userAgent } = req.body;
-  if (!text || !text.trim()) return res.status(400).json({ error: "missing text" });
+  if (!text || typeof text !== "string" || !text.trim()) return res.status(400).json({ error: "missing text" });
   const id = crypto.randomUUID().split("-")[0];
   const createdAt = new Date().toISOString();
   db.prepare(
-    "INSERT INTO feedback (id, text, user_id, user_name, current_view, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-  ).run(id, text.trim(), userId || null, userName || null, currentView || null, userAgent || null, createdAt);
+    "INSERT INTO feedback (id, family_id, text, user_id, user_name, current_view, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(id, req.familyId, text.trim(), userId || null, userName || null, currentView || null, userAgent || null, createdAt);
   res.json({ ok: true, id });
 });
 
-// GET /api/feedback — list all feedback
+// GET /api/feedback — list feedback for current family
 app.get("/api/feedback", requireFamilyAuth, (req, res) => {
-  const rows = db.prepare("SELECT * FROM feedback ORDER BY created_at DESC").all();
+  const rows = db.prepare("SELECT * FROM feedback WHERE family_id = ? ORDER BY created_at DESC").all(req.familyId);
   res.json(rows);
 });
 
@@ -501,7 +551,7 @@ app.patch("/api/feedback/:id", requireFamilyAuth, (req, res) => {
   const { completed, note } = req.body;
   const completedAt = completed ? new Date().toISOString() : null;
   const resolutionNote = completed ? (note || null) : null;
-  const result = db.prepare("UPDATE feedback SET completed_at = ?, resolution_note = ? WHERE id = ?").run(completedAt, resolutionNote, req.params.id);
+  const result = db.prepare("UPDATE feedback SET completed_at = ?, resolution_note = ? WHERE id = ? AND family_id = ?").run(completedAt, resolutionNote, req.params.id, req.familyId);
   if (result.changes === 0) return res.status(404).json({ error: "not found" });
   res.json({ ok: true });
 });
@@ -637,8 +687,23 @@ async function migrateExistingData() {
   console.log(`  Re-keyed ${reKeyed.changes} store rows`);
 
   console.log("ParentSlop: Migration complete. First admin login will prompt for password.");
-  console.log(`  Temporary login: family name "My Family", password: ${tempPassword}`);
+  const credFile = path.join(__dirname, ".migration-credentials");
+  fs.writeFileSync(credFile, `Family: My Family\nTemporary password: ${tempPassword}\nDelete this file after logging in.\n`, { mode: 0o600 });
+  console.log(`  Temporary credentials written to ${credFile} (delete after use)`);
 }
+
+// --- Error handler (suppress stack traces) ------------------------------------
+
+app.use((err, req, res, _next) => {
+  if (err.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "invalid JSON" });
+  }
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ error: "payload too large" });
+  }
+  console.error("Unhandled error:", err.message);
+  res.status(500).json({ error: "internal server error" });
+});
 
 // --- Start -------------------------------------------------------------------
 
