@@ -2,6 +2,8 @@ const express = require("express");
 const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
+const cookieParser = require("cookie-parser");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -43,33 +45,141 @@ try {
   db.exec("ALTER TABLE feedback ADD COLUMN resolution_note TEXT");
 }
 
+// --- Auth tables -------------------------------------------------------------
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS families (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    auth_level TEXT NOT NULL DEFAULT 'none',
+    needs_password_reset INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS family_members (
+    id TEXT PRIMARY KEY,
+    family_id TEXT NOT NULL REFERENCES families(id),
+    display_name TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    pin_hash TEXT,
+    password_hash TEXT,
+    salt TEXT,
+    created_at TEXT NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    family_id TEXT NOT NULL REFERENCES families(id),
+    member_id TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  )
+`);
+
+// --- Password hashing utilities ----------------------------------------------
+
+function hashPassword(password) {
+  return new Promise((resolve, reject) => {
+    const salt = crypto.randomBytes(16).toString("hex");
+    crypto.scrypt(password, salt, 64, (err, derivedKey) => {
+      if (err) return reject(err);
+      resolve({ hash: derivedKey.toString("hex"), salt });
+    });
+  });
+}
+
+function verifyPassword(password, hash, salt) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, 64, (err, derivedKey) => {
+      if (err) return reject(err);
+      const hashBuffer = Buffer.from(hash, "hex");
+      resolve(crypto.timingSafeEqual(derivedKey, hashBuffer));
+    });
+  });
+}
+
+// --- Session helpers ---------------------------------------------------------
+
+const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function createSession(familyId, memberId = null) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + SESSION_DURATION_MS).toISOString();
+  db.prepare("INSERT INTO sessions (id, family_id, member_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)").run(id, familyId, memberId, now, expiresAt);
+  return { id, familyId, memberId, expiresAt };
+}
+
+function getSession(sessionId) {
+  if (!sessionId) return null;
+  const session = db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId);
+  if (!session) return null;
+  if (new Date(session.expires_at) < new Date()) {
+    db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
+    return null;
+  }
+  return session;
+}
+
+// --- Auth middleware ----------------------------------------------------------
+
+function requireFamilyAuth(req, res, next) {
+  const sessionId = req.cookies?.session;
+  const session = getSession(sessionId);
+  if (!session) {
+    return res.status(401).json({ error: "not authenticated" });
+  }
+  req.familyId = session.family_id;
+  req.memberId = session.member_id;
+  req.sessionId = session.id;
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.memberId) return res.status(403).json({ error: "no member selected" });
+  const member = db.prepare("SELECT * FROM family_members WHERE id = ? AND family_id = ?").get(req.memberId, req.familyId);
+  if (!member || !member.is_admin) return res.status(403).json({ error: "admin required" });
+  next();
+}
+
 // --- Middleware ---------------------------------------------------------------
 
 app.use(express.json({ limit: "5mb" }));
+app.use(cookieParser());
 app.use(express.static(__dirname));
 
 // --- Routes ------------------------------------------------------------------
 
 // GET /api/store/:key — read a single store
-app.get("/api/store/:key", (req, res) => {
-  const row = db.prepare("SELECT key, value, updated_at FROM stores WHERE key = ?").get(req.params.key);
+app.get("/api/store/:key", requireFamilyAuth, (req, res) => {
+  const nsKey = `${req.familyId}:${req.params.key}`;
+  const row = db.prepare("SELECT key, value, updated_at FROM stores WHERE key = ?").get(nsKey);
   if (!row) return res.status(404).json({ error: "not found" });
-  res.json(row);
+  // Return un-namespaced key to client
+  res.json({ key: req.params.key, value: row.value, updated_at: row.updated_at });
 });
 
 // PUT /api/store/:key — upsert a single store
-app.put("/api/store/:key", (req, res) => {
+app.put("/api/store/:key", requireFamilyAuth, (req, res) => {
   const { value } = req.body;
   if (value === undefined) return res.status(400).json({ error: "missing value" });
   const now = new Date().toISOString();
+  const nsKey = `${req.familyId}:${req.params.key}`;
   db.prepare(
     "INSERT INTO stores (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-  ).run(req.params.key, typeof value === "string" ? value : JSON.stringify(value), now);
+  ).run(nsKey, typeof value === "string" ? value : JSON.stringify(value), now);
   res.json({ ok: true });
 });
 
 // POST /api/store/sync — bulk upsert
-app.post("/api/store/sync", (req, res) => {
+app.post("/api/store/sync", requireFamilyAuth, (req, res) => {
   const { stores } = req.body;
   if (!stores || typeof stores !== "object") return res.status(400).json({ error: "missing stores object" });
   const now = new Date().toISOString();
@@ -78,19 +188,285 @@ app.post("/api/store/sync", (req, res) => {
   );
   const tx = db.transaction((entries) => {
     for (const [key, value] of entries) {
-      upsert.run(key, typeof value === "string" ? value : JSON.stringify(value), now);
+      const nsKey = `${req.familyId}:${key}`;
+      upsert.run(nsKey, typeof value === "string" ? value : JSON.stringify(value), now);
     }
   });
   tx(Object.entries(stores));
   res.json({ ok: true, count: Object.keys(stores).length });
 });
 
+// --- Auth endpoints ----------------------------------------------------------
+
+function slugify(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function setCookie(res, sessionId) {
+  res.cookie("session", sessionId, {
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: SESSION_DURATION_MS,
+    path: "/",
+  });
+}
+
+// POST /api/auth/register — create family + admin member + session
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { familyName, adminName, password } = req.body;
+    if (!familyName?.trim() || !adminName?.trim() || !password) {
+      return res.status(400).json({ error: "familyName, adminName, and password are required" });
+    }
+
+    const slug = slugify(familyName.trim());
+    if (!slug) return res.status(400).json({ error: "invalid family name" });
+
+    // Check uniqueness
+    const existing = db.prepare("SELECT id FROM families WHERE slug = ?").get(slug);
+    if (existing) return res.status(409).json({ error: "family name already taken" });
+
+    const familyId = crypto.randomUUID();
+    const memberId = crypto.randomUUID();
+    const { hash, salt } = await hashPassword(password);
+    const now = new Date().toISOString();
+
+    db.prepare("INSERT INTO families (id, name, slug, password_hash, salt, auth_level, created_at) VALUES (?, ?, ?, ?, ?, 'none', ?)").run(familyId, familyName.trim(), slug, hash, salt, now);
+    db.prepare("INSERT INTO family_members (id, family_id, display_name, is_admin, created_at) VALUES (?, ?, ?, 1, ?)").run(memberId, familyId, adminName.trim(), now);
+
+    const session = createSession(familyId, memberId);
+    setCookie(res, session.id);
+
+    res.json({ ok: true, familyId, memberId });
+  } catch (err) {
+    console.error("Register error:", err);
+    res.status(500).json({ error: "registration failed" });
+  }
+});
+
+// POST /api/auth/login — verify family password, create session
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { familyName, password } = req.body;
+    if (!familyName?.trim() || !password) {
+      return res.status(400).json({ error: "familyName and password are required" });
+    }
+
+    const slug = slugify(familyName.trim());
+    const family = db.prepare("SELECT * FROM families WHERE slug = ?").get(slug);
+    if (!family) return res.status(401).json({ error: "invalid family name or password" });
+
+    const valid = await verifyPassword(password, family.password_hash, family.salt);
+    if (!valid) return res.status(401).json({ error: "invalid family name or password" });
+
+    const session = createSession(family.id);
+    setCookie(res, session.id);
+
+    res.json({ ok: true, familyId: family.id, needsPasswordReset: !!family.needs_password_reset });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: "login failed" });
+  }
+});
+
+// GET /api/auth/me — session state
+app.get("/api/auth/me", (req, res) => {
+  const sessionId = req.cookies?.session;
+  const session = getSession(sessionId);
+  if (!session) return res.json({ authenticated: false });
+
+  const family = db.prepare("SELECT id, name, slug, auth_level, needs_password_reset FROM families WHERE id = ?").get(session.family_id);
+  if (!family) return res.json({ authenticated: false });
+
+  const members = db.prepare("SELECT id, display_name, is_admin, pin_hash IS NOT NULL as has_pin, password_hash IS NOT NULL as has_password FROM family_members WHERE family_id = ?").all(family.id);
+
+  const currentMember = session.member_id
+    ? members.find((m) => m.id === session.member_id) || null
+    : null;
+
+  res.json({
+    authenticated: true,
+    family: {
+      id: family.id,
+      name: family.name,
+      slug: family.slug,
+      authLevel: family.auth_level,
+      needsPasswordReset: !!family.needs_password_reset,
+    },
+    members: members.map((m) => ({
+      id: m.id,
+      displayName: m.display_name,
+      isAdmin: !!m.is_admin,
+      hasPin: !!m.has_pin,
+      hasPassword: !!m.has_password,
+    })),
+    currentMember: currentMember ? {
+      id: currentMember.id,
+      displayName: currentMember.display_name,
+      isAdmin: !!currentMember.is_admin,
+    } : null,
+  });
+});
+
+// POST /api/auth/select-member — set member in session
+app.post("/api/auth/select-member", requireFamilyAuth, async (req, res) => {
+  try {
+    const { memberId, pin, password } = req.body;
+    if (!memberId) return res.status(400).json({ error: "memberId required" });
+
+    const member = db.prepare("SELECT * FROM family_members WHERE id = ? AND family_id = ?").get(memberId, req.familyId);
+    if (!member) return res.status(404).json({ error: "member not found" });
+
+    const family = db.prepare("SELECT auth_level FROM families WHERE id = ?").get(req.familyId);
+    const authLevel = family?.auth_level || "none";
+
+    // Verify credentials based on auth level
+    if (authLevel === "pin" && member.pin_hash) {
+      if (!pin) return res.status(401).json({ error: "PIN required" });
+      const valid = await verifyPassword(pin, member.pin_hash, member.salt);
+      if (!valid) return res.status(401).json({ error: "invalid PIN" });
+    } else if (authLevel === "password" && member.password_hash) {
+      if (!password) return res.status(401).json({ error: "password required" });
+      const valid = await verifyPassword(password, member.password_hash, member.salt);
+      if (!valid) return res.status(401).json({ error: "invalid password" });
+    }
+
+    db.prepare("UPDATE sessions SET member_id = ? WHERE id = ?").run(memberId, req.sessionId);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Select member error:", err);
+    res.status(500).json({ error: "failed to select member" });
+  }
+});
+
+// POST /api/auth/switch-user — clear member_id from session
+app.post("/api/auth/switch-user", requireFamilyAuth, (req, res) => {
+  db.prepare("UPDATE sessions SET member_id = NULL WHERE id = ?").run(req.sessionId);
+  res.json({ ok: true });
+});
+
+// POST /api/auth/logout — delete session, clear cookie
+app.post("/api/auth/logout", (req, res) => {
+  const sessionId = req.cookies?.session;
+  if (sessionId) {
+    db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
+  }
+  res.clearCookie("session", { path: "/" });
+  res.json({ ok: true });
+});
+
+// POST /api/auth/add-member — admin-only: add family member
+app.post("/api/auth/add-member", requireFamilyAuth, requireAdmin, (req, res) => {
+  const { displayName, isAdmin } = req.body;
+  if (!displayName?.trim()) return res.status(400).json({ error: "displayName required" });
+
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  db.prepare("INSERT INTO family_members (id, family_id, display_name, is_admin, created_at) VALUES (?, ?, ?, ?, ?)").run(id, req.familyId, displayName.trim(), isAdmin ? 1 : 0, now);
+
+  res.json({ ok: true, id, displayName: displayName.trim() });
+});
+
+// POST /api/auth/set-auth-level — admin-only: update family auth_level
+app.post("/api/auth/set-auth-level", requireFamilyAuth, requireAdmin, (req, res) => {
+  const { authLevel } = req.body;
+  if (!["none", "pin", "password"].includes(authLevel)) {
+    return res.status(400).json({ error: "authLevel must be none, pin, or password" });
+  }
+  db.prepare("UPDATE families SET auth_level = ? WHERE id = ?").run(authLevel, req.familyId);
+  res.json({ ok: true });
+});
+
+// POST /api/auth/set-pin — set member PIN
+app.post("/api/auth/set-pin", requireFamilyAuth, async (req, res) => {
+  try {
+    const { memberId, pin } = req.body;
+    const targetId = memberId || req.memberId;
+    if (!targetId) return res.status(400).json({ error: "memberId required" });
+
+    // Only allow setting own pin, or admin setting anyone's
+    if (targetId !== req.memberId) {
+      const caller = db.prepare("SELECT is_admin FROM family_members WHERE id = ? AND family_id = ?").get(req.memberId, req.familyId);
+      if (!caller?.is_admin) return res.status(403).json({ error: "admin required to set other members' PINs" });
+    }
+
+    const member = db.prepare("SELECT id FROM family_members WHERE id = ? AND family_id = ?").get(targetId, req.familyId);
+    if (!member) return res.status(404).json({ error: "member not found" });
+
+    if (!pin) {
+      // Clear PIN
+      db.prepare("UPDATE family_members SET pin_hash = NULL, salt = NULL WHERE id = ?").run(targetId);
+    } else {
+      const { hash, salt } = await hashPassword(pin);
+      db.prepare("UPDATE family_members SET pin_hash = ?, salt = ? WHERE id = ?").run(hash, salt, targetId);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Set PIN error:", err);
+    res.status(500).json({ error: "failed to set PIN" });
+  }
+});
+
+// POST /api/auth/set-password — set member password
+app.post("/api/auth/set-password", requireFamilyAuth, async (req, res) => {
+  try {
+    const { memberId, password } = req.body;
+    const targetId = memberId || req.memberId;
+    if (!targetId) return res.status(400).json({ error: "memberId required" });
+
+    // Only allow setting own password, or admin setting anyone's
+    if (targetId !== req.memberId) {
+      const caller = db.prepare("SELECT is_admin FROM family_members WHERE id = ? AND family_id = ?").get(req.memberId, req.familyId);
+      if (!caller?.is_admin) return res.status(403).json({ error: "admin required" });
+    }
+
+    const member = db.prepare("SELECT id FROM family_members WHERE id = ? AND family_id = ?").get(targetId, req.familyId);
+    if (!member) return res.status(404).json({ error: "member not found" });
+
+    if (!password) {
+      db.prepare("UPDATE family_members SET password_hash = NULL WHERE id = ?").run(targetId);
+    } else {
+      const { hash, salt } = await hashPassword(password);
+      db.prepare("UPDATE family_members SET password_hash = ?, salt = ? WHERE id = ?").run(hash, salt, targetId);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Set password error:", err);
+    res.status(500).json({ error: "failed to set password" });
+  }
+});
+
+// POST /api/auth/change-family-password — admin (or during password reset): change family password
+app.post("/api/auth/change-family-password", requireFamilyAuth, async (req, res) => {
+  try {
+    // Allow without member selection if needs_password_reset is set (migration flow)
+    const family = db.prepare("SELECT needs_password_reset FROM families WHERE id = ?").get(req.familyId);
+    if (!family?.needs_password_reset) {
+      // Normal flow: require admin
+      if (!req.memberId) return res.status(403).json({ error: "no member selected" });
+      const member = db.prepare("SELECT is_admin FROM family_members WHERE id = ? AND family_id = ?").get(req.memberId, req.familyId);
+      if (!member?.is_admin) return res.status(403).json({ error: "admin required" });
+    }
+
+    const { newPassword } = req.body;
+    if (!newPassword) return res.status(400).json({ error: "newPassword required" });
+
+    const { hash, salt } = await hashPassword(newPassword);
+    db.prepare("UPDATE families SET password_hash = ?, salt = ?, needs_password_reset = 0 WHERE id = ?").run(hash, salt, req.familyId);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Change family password error:", err);
+    res.status(500).json({ error: "failed to change password" });
+  }
+});
+
 // --- Feedback ----------------------------------------------------------------
 
-const crypto = require("crypto");
-
 // POST /api/feedback — submit feedback
-app.post("/api/feedback", (req, res) => {
+app.post("/api/feedback", requireFamilyAuth, (req, res) => {
   const { text, userId, userName, currentView, userAgent } = req.body;
   if (!text || !text.trim()) return res.status(400).json({ error: "missing text" });
   const id = crypto.randomUUID().split("-")[0];
@@ -102,13 +478,13 @@ app.post("/api/feedback", (req, res) => {
 });
 
 // GET /api/feedback — list all feedback
-app.get("/api/feedback", (req, res) => {
+app.get("/api/feedback", requireFamilyAuth, (req, res) => {
   const rows = db.prepare("SELECT * FROM feedback ORDER BY created_at DESC").all();
   res.json(rows);
 });
 
 // PATCH /api/feedback/:id — mark feedback completed/uncompleted with optional note
-app.patch("/api/feedback/:id", (req, res) => {
+app.patch("/api/feedback/:id", requireFamilyAuth, (req, res) => {
   const { completed, note } = req.body;
   const completedAt = completed ? new Date().toISOString() : null;
   const resolutionNote = completed ? (note || null) : null;
@@ -188,7 +564,7 @@ function listBackups() {
 }
 
 // POST /api/backup — trigger a backup
-app.post("/api/backup", async (req, res) => {
+app.post("/api/backup", requireFamilyAuth, async (req, res) => {
   try {
     const filename = await createBackup();
     res.json({ ok: true, filename });
@@ -199,7 +575,7 @@ app.post("/api/backup", async (req, res) => {
 });
 
 // GET /api/backups — list existing backups
-app.get("/api/backups", (req, res) => {
+app.get("/api/backups", requireFamilyAuth, (req, res) => {
   res.json(listBackups());
 });
 
@@ -208,10 +584,58 @@ setInterval(() => {
   createBackup().catch(err => console.error("Scheduled backup failed:", err));
 }, 6 * 60 * 60 * 1000);
 
+// --- Data migration (existing data → default family) -------------------------
+
+async function migrateExistingData() {
+  const familyCount = db.prepare("SELECT COUNT(*) as count FROM families").get().count;
+  const storeCount = db.prepare("SELECT COUNT(*) as count FROM stores").get().count;
+
+  if (familyCount > 0 || storeCount === 0) return; // No migration needed
+
+  console.log("ParentSlop: Migrating existing data to default family...");
+
+  const familyId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  // Create default family with temporary password + needs_password_reset flag
+  const tempPassword = crypto.randomBytes(16).toString("hex");
+  const { hash, salt } = await hashPassword(tempPassword);
+  db.prepare("INSERT INTO families (id, name, slug, password_hash, salt, auth_level, needs_password_reset, created_at) VALUES (?, ?, ?, ?, ?, 'none', 1, ?)").run(familyId, "My Family", "my-family", hash, salt, now);
+
+  // Parse users from the store and create family_members
+  const usersRow = db.prepare("SELECT value FROM stores WHERE key = 'parentslop.users.v1'").get();
+  if (usersRow) {
+    try {
+      const users = JSON.parse(usersRow.value);
+      if (Array.isArray(users)) {
+        const insertMember = db.prepare("INSERT INTO family_members (id, family_id, display_name, is_admin, created_at) VALUES (?, ?, ?, ?, ?)");
+        for (const u of users) {
+          insertMember.run(u.id, familyId, u.name || "User", u.isAdmin ? 1 : 0, u.createdAt || now);
+        }
+        console.log(`  Created ${users.length} family members`);
+      }
+    } catch (e) {
+      console.warn("  Failed to parse users store:", e.message);
+    }
+  }
+
+  // Re-key ALL store rows: prepend familyId
+  const reKeyed = db.prepare("UPDATE stores SET key = ? || ':' || key WHERE key NOT LIKE '%:%'").run(familyId);
+  console.log(`  Re-keyed ${reKeyed.changes} store rows`);
+
+  console.log("ParentSlop: Migration complete. First admin login will prompt for password.");
+  console.log(`  Temporary login: family name "My Family", password: ${tempPassword}`);
+}
+
 // --- Start -------------------------------------------------------------------
 
-app.listen(PORT, () => {
-  console.log(`ParentSlop server running on http://localhost:${PORT}`);
-  // Run initial backup on startup
-  createBackup().catch(err => console.error("Startup backup failed:", err));
+migrateExistingData().then(() => {
+  app.listen(PORT, () => {
+    console.log(`ParentSlop server running on http://localhost:${PORT}`);
+    // Run initial backup on startup
+    createBackup().catch(err => console.error("Startup backup failed:", err));
+  });
+}).catch((err) => {
+  console.error("Migration failed:", err);
+  process.exit(1);
 });

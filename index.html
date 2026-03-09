@@ -367,7 +367,10 @@
         </div>
       </header>
 
-      <!-- Phase: Setup wizard (first run) -->
+      <!-- Phase: Auth screen (login/register/member selection) -->
+      <ps-auth-screen id="auth-screen" hidden></ps-auth-screen>
+
+      <!-- Phase: Setup wizard (first run — currency creation) -->
       <ps-setup-wizard id="setup-wizard" hidden></ps-setup-wizard>
 
       <!-- Phase: User selector (shown when switching users or no user selected) -->
@@ -410,6 +413,7 @@
               <button data-admin-tab="users">Users</button>
               <button data-admin-tab="log">Log</button>
               <button data-admin-tab="feedback">Feedback</button>
+              <button data-admin-tab="security">Security</button>
               <button data-admin-tab="data">Data</button>
             </div>
             <div id="admin-content">
@@ -420,6 +424,7 @@
               <ps-admin-users id="admin-users"></ps-admin-users>
               <ps-admin-log id="admin-log"></ps-admin-log>
               <ps-admin-feedback id="admin-feedback"></ps-admin-feedback>
+              <ps-admin-security id="admin-security"></ps-admin-security>
               <div id="admin-data">
                 <div class="data-panel">
                   <h3>Data Management</h3>
@@ -476,6 +481,7 @@
   <script src="/tracker/sfx.js"></script>
 
   <!-- Components (order doesn't matter after core + sfx) -->
+  <script src="/tracker/components/ps-auth-screen.js"></script>
   <script src="/tracker/components/ps-setup-wizard.js"></script>
   <script src="/tracker/components/ps-nav-bar.js"></script>
   <script src="/tracker/components/ps-balance-bar.js"></script>
@@ -491,6 +497,7 @@
   <script src="/tracker/components/ps-admin-users.js"></script>
   <script src="/tracker/components/ps-admin-log.js"></script>
   <script src="/tracker/components/ps-admin-feedback.js"></script>
+  <script src="/tracker/components/ps-admin-security.js"></script>
   <script src="/tracker/components/ps-history.js"></script>
   <script src="/tracker/components/ps-feedback-fab.js"></script>
 
@@ -938,7 +945,7 @@
     // --- Page wiring ---------------------------------------------------------
 
     window.addEventListener("DOMContentLoaded", async () => {
-      await tracker.initStores();
+      const authScreen = document.getElementById("auth-screen");
       const setupWizard = document.getElementById("setup-wizard");
       const userSelector = document.getElementById("user-selector");
       const trackerApp = document.getElementById("tracker-app");
@@ -950,38 +957,93 @@
       const overlayUserLabel = document.getElementById("overlay-user-label");
       const toastContainer = document.getElementById("toast-container");
 
-      // ---- Determine initial state ----
-      const app = trackerStore.app.data;
+      // ---- View state functions ----
 
-      function showSetup() {
-        setupWizard.hidden = false;
+      function hideAll() {
+        authScreen.hidden = true;
+        setupWizard.hidden = true;
         userSelector.hidden = true;
         trackerApp.hidden = true;
       }
 
+      function showAuth() {
+        hideAll();
+        authScreen.hidden = false;
+      }
+
+      function showSetup() {
+        hideAll();
+        setupWizard.hidden = false;
+      }
+
       function showUserSelector() {
-        setupWizard.hidden = true;
+        hideAll();
         userSelector.hidden = false;
-        trackerApp.hidden = true;
-        // Refresh user list from store
         userSelector.refreshUsers();
       }
 
       function showTracker() {
-        setupWizard.hidden = true;
-        userSelector.hidden = true;
+        hideAll();
         trackerApp.hidden = false;
         switchView(trackerStore.app.data.currentView || "dashboard");
       }
 
-      // Initial routing
-      if (!app.setupComplete) {
-        showSetup();
-      } else if (!app.currentUserId) {
-        showUserSelector();
-      } else {
-        showTracker();
+      // ---- Auth-first boot sequence ----
+      async function boot() {
+        try {
+          const res = await fetch("/api/auth/me");
+          const data = await res.json();
+
+          if (!data.authenticated) {
+            // Not logged in — show auth screen
+            showAuth();
+            return;
+          }
+
+          if (!data.currentMember) {
+            // Logged into family but no member selected — show member selection
+            authScreen.showMemberSelection(data.family, data.members);
+            showAuth();
+            return;
+          }
+
+          // Fully authenticated — load stores and proceed
+          await tracker.initStores();
+          tracker.migrateUsers();
+
+          const app = trackerStore.app.data;
+
+          // Sync current member to app store
+          app.currentUserId = data.currentMember.id;
+          trackerStore.app.save();
+
+          if (!app.setupComplete) {
+            // Check if there are currencies — if not, show currency setup
+            if (trackerStore.currencies.data.length === 0) {
+              showSetup();
+            } else {
+              app.setupComplete = true;
+              trackerStore.app.save();
+              showTracker();
+              eventBus.emit("user:changed", { userId: app.currentUserId });
+            }
+          } else {
+            showTracker();
+            eventBus.emit("user:changed", { userId: app.currentUserId });
+          }
+        } catch (err) {
+          console.warn("Boot: failed to reach server, falling back to localStorage", err);
+          // Fallback: show auth screen
+          showAuth();
+        }
       }
+
+      await boot();
+
+      // ---- Auth complete (from auth screen) ----
+      document.addEventListener("auth:complete", async () => {
+        await boot();
+      });
 
       // ---- Setup complete ----
       eventBus.on("setup:complete", () => {
@@ -1004,10 +1066,28 @@
       });
 
       // ---- Switch user request ----
-      eventBus.on("user:switch-requested", () => {
+      eventBus.on("user:switch-requested", async () => {
         trackerStore.app.data.currentUserId = null;
         trackerStore.app.save();
-        showUserSelector();
+        try {
+          await fetch("/api/auth/switch-user", { method: "POST" });
+          // Show auth member selection
+          const res = await fetch("/api/auth/me");
+          const data = await res.json();
+          if (data.authenticated) {
+            authScreen.showMemberSelection(data.family, data.members);
+            showAuth();
+          } else {
+            showAuth();
+          }
+        } catch (e) {
+          showUserSelector();
+        }
+      });
+
+      // ---- 401 handler (auth expired) ----
+      eventBus.on("auth:required", () => {
+        showAuth();
       });
 
       // ---- View switching ----

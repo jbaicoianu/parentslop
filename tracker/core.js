@@ -72,6 +72,11 @@ class TrackerStore {
     }
     try {
       const res = await fetch(`/api/store/${encodeURIComponent(this._key)}`);
+      if (res.status === 401) {
+        bus.emit("auth:required");
+        this.load();
+        return false;
+      }
       if (!res.ok) {
         this.load();
         return false;
@@ -89,11 +94,14 @@ class TrackerStore {
 
   async _persistToServer() {
     try {
-      await fetch(`/api/store/${encodeURIComponent(this._key)}`, {
+      const res = await fetch(`/api/store/${encodeURIComponent(this._key)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ value: JSON.stringify(this._data) }),
       });
+      if (res.status === 401) {
+        bus.emit("auth:required");
+      }
     } catch (e) {
       console.warn(`TrackerStore: server persist failed for ${this._key}`, e);
     }
@@ -134,6 +142,7 @@ function migrateUsers() {
   for (const u of users) {
     if (u.isAdmin === undefined) { u.isAdmin = false; changed = true; }
     if (!u.balances) { u.balances = {}; changed = true; }
+    if (!u.tags) { u.tags = []; changed = true; }
   }
   if (changed) usersStore.save(users);
   return users;
@@ -498,6 +507,7 @@ function createTask(data) {
     bonusCriteria: data.bonusCriteria || null, // [{ id, label, multiplier }]
     category: data.category || "routine", // "routine" | "jobboard"
     payType: data.payType || "fixed", // "fixed" | "hourly"
+    requiredTags: data.requiredTags || [], // tags required for task visibility
     activeDays: data.activeDays || [], // day numbers (0=Sun..6=Sat); empty = every day
     multiUser: data.multiUser ?? true, // whether multiple kids can accept
     maxPayout: data.maxPayout || null, // optional cap for hourly: { currencyId: amount }
@@ -653,6 +663,10 @@ function getTasksForUser(userId) {
     if (t.isPenalty) return false;
     if (t.recurrence === "transient" && !t.available) return false;
     if (t.assignedUsers.length > 0 && !t.assignedUsers.includes(userId)) return false;
+    if (t.requiredTags?.length > 0) {
+      const userTags = usersStore.data.find(u => u.id === userId)?.tags || [];
+      if (!t.requiredTags.some(tag => userTags.includes(tag))) return false;
+    }
     return true;
   });
   return tasks;

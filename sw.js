@@ -1,9 +1,10 @@
-const CACHE_VERSION = 'parentslop-v2';
+const CACHE_VERSION = 'parentslop-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/tracker/core.js',
   '/tracker/sfx.js',
+  '/tracker/components/ps-auth-screen.js',
   '/tracker/components/ps-setup-wizard.js',
   '/tracker/components/ps-nav-bar.js',
   '/tracker/components/ps-balance-bar.js',
@@ -19,6 +20,7 @@ const STATIC_ASSETS = [
   '/tracker/components/ps-admin-users.js',
   '/tracker/components/ps-admin-log.js',
   '/tracker/components/ps-admin-feedback.js',
+  '/tracker/components/ps-admin-security.js',
   '/tracker/components/ps-history.js',
   '/tracker/components/ps-feedback-fab.js',
 ];

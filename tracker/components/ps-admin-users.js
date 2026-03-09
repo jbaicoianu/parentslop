@@ -83,6 +83,48 @@ class PsAdminUsers extends HTMLElement {
           align-items: center;
           margin-bottom: 12px;
         }
+        .tags-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px;
+          align-items: center;
+          margin: 6px 0;
+        }
+        .tag-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          padding: 2px 8px;
+          border-radius: 999px;
+          font-size: 0.68rem;
+          background: rgba(102, 217, 239, 0.1);
+          color: var(--accent);
+          border: 1px solid rgba(102, 217, 239, 0.2);
+        }
+        .tag-remove {
+          cursor: pointer;
+          font-size: 0.8rem;
+          opacity: 0.7;
+          background: none;
+          border: none;
+          color: inherit;
+          padding: 0 2px;
+          line-height: 1;
+        }
+        .tag-remove:hover { opacity: 1; }
+        .tag-add-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 22px; height: 22px;
+          border-radius: 999px;
+          border: 1px dashed rgba(102, 217, 239, 0.3);
+          background: transparent;
+          color: var(--accent);
+          font-size: 0.8rem;
+          cursor: pointer;
+        }
+        .tag-add-btn:hover { background: rgba(102, 217, 239, 0.08); }
       </style>
       <div class="panel">
         <div class="toolbar">
@@ -110,6 +152,12 @@ class PsAdminUsers extends HTMLElement {
                   </div>
                 `).join("")}
               </div>
+              <div class="tags-row">
+                ${(u.tags || []).map(tag => `
+                  <span class="tag-pill">${tag}<button class="tag-remove" data-tag-user="${u.id}" data-tag="${tag}">×</button></span>
+                `).join("")}
+                <button class="tag-add-btn" data-add-tag="${u.id}" title="Add tag">+</button>
+              </div>
               <div class="user-actions">
                 <button class="btn btn-sm btn-ghost" data-toggle-admin="${u.id}">
                   ${u.isAdmin ? "Remove Admin" : "Make Admin"}
@@ -125,19 +173,46 @@ class PsAdminUsers extends HTMLElement {
       </div>
     `;
 
-    this.shadowRoot.getElementById("add-user")?.addEventListener("click", () => {
+    this.shadowRoot.getElementById("add-user")?.addEventListener("click", async () => {
       const name = prompt("Enter user name:");
       if (!name?.trim()) return;
-      const users = trackerStore.users.data;
-      users.push({
-        id: tracker.uid(),
-        name: name.trim(),
-        isAdmin: false,
-        balances: {},
-        createdAt: tracker.now(),
-      });
-      trackerStore.users.save();
-      this.render();
+
+      try {
+        // Add to auth system
+        const res = await fetch("/api/auth/add-member", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ displayName: name.trim(), isAdmin: false }),
+        });
+        const data = await res.json();
+        const memberId = data.id || tracker.uid();
+
+        // Add to usersStore
+        const users = trackerStore.users.data;
+        users.push({
+          id: memberId,
+          name: name.trim(),
+          isAdmin: false,
+          balances: {},
+          tags: [],
+          createdAt: tracker.now(),
+        });
+        trackerStore.users.save();
+        this.render();
+      } catch (e) {
+        // Fallback: add to store only
+        const users = trackerStore.users.data;
+        users.push({
+          id: tracker.uid(),
+          name: name.trim(),
+          isAdmin: false,
+          balances: {},
+          tags: [],
+          createdAt: tracker.now(),
+        });
+        trackerStore.users.save();
+        this.render();
+      }
     });
 
     this.shadowRoot.querySelectorAll("[data-toggle-admin]").forEach((btn) => {
@@ -218,6 +293,41 @@ class PsAdminUsers extends HTMLElement {
           trackerStore.users.save();
           this.render();
         }
+      });
+    });
+
+    // Tag management
+    this.shadowRoot.querySelectorAll("[data-add-tag]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const userId = btn.dataset.addTag;
+        const u = trackerStore.users.data.find((x) => x.id === userId);
+        if (!u) return;
+        // Collect all existing tags for suggestions
+        const allTags = [...new Set(trackerStore.users.data.flatMap((x) => x.tags || []))];
+        const unusedTags = allTags.filter((t) => !(u.tags || []).includes(t));
+        let hint = "Enter a tag name:";
+        if (unusedTags.length > 0) hint += `\n\nExisting tags: ${unusedTags.join(", ")}`;
+        const tag = prompt(hint);
+        if (!tag?.trim()) return;
+        if (!u.tags) u.tags = [];
+        const trimmed = tag.trim().toLowerCase();
+        if (!u.tags.includes(trimmed)) {
+          u.tags.push(trimmed);
+          trackerStore.users.save();
+          this.render();
+        }
+      });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-tag-user]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const userId = btn.dataset.tagUser;
+        const tag = btn.dataset.tag;
+        const u = trackerStore.users.data.find((x) => x.id === userId);
+        if (!u || !u.tags) return;
+        u.tags = u.tags.filter((t) => t !== tag);
+        trackerStore.users.save();
+        this.render();
       });
     });
   }

@@ -74,6 +74,7 @@ class PsAdminTasks extends HTMLElement {
                   ${t.payType === "hourly" ? "· hourly" : ""}
                   ${t.maxPayout ? `· max ${this._rewardTextFromHash(t.maxPayout)}` : ""}
                   ${t.multiUser === false ? "· single" : ""}
+                  ${t.requiredTags?.length ? `· tags: ${t.requiredTags.join(", ")}` : ""}
                   ${t.requiresApproval ? "· approval required" : ""}
                   ${t.streakBonus ? `· streak ${t.streakBonus.threshold}d=${t.streakBonus.multiplier}x` : ""}
                   ${t.timerBonus ? `· timer ${t.timerBonus.mode === "over" ? "≥" : "<"}${t.timerBonus.targetSeconds}s=${t.timerBonus.multiplier}x` : ""}
@@ -210,10 +211,12 @@ class PsAdminTasks extends HTMLElement {
     const bonusCriteria = task?.bonusCriteria || [];
     const activeDays = task?.activeDays || [];
     const assignedUsers = task?.assignedUsers || [];
+    const requiredTags = task?.requiredTags || [];
     const category = task?.category || "routine";
     const payType = task?.payType || "fixed";
     const multiUser = task?.multiUser ?? true;
     const maxPayout = task?.maxPayout || {};
+    const allTags = [...new Set(users.flatMap((u) => u.tags || []))];
 
     this.shadowRoot.innerHTML = `
       <style>${tracker.TRACKER_CSS}
@@ -513,6 +516,18 @@ class PsAdminTasks extends HTMLElement {
               </div>
             `).join("")}
           </div>
+
+          ${allTags.length > 0 ? `
+            <div class="section-label">Required Tags (only users with these tags see this task)</div>
+            <div class="user-checkboxes">
+              ${allTags.map((tag) => `
+                <div class="user-check">
+                  <input type="checkbox" id="tag-${tag}" data-required-tag="${tag}" ${requiredTags.includes(tag) ? "checked" : ""} />
+                  <label for="tag-${tag}">${tag}</label>
+                </div>
+              `).join("")}
+            </div>
+          ` : ""}
         ` : ""}
 
         <div class="form-actions">
@@ -688,6 +703,12 @@ class PsAdminTasks extends HTMLElement {
         if (cb.checked) assignedUsers.push(cb.dataset.userId);
       });
       data.assignedUsers = assignedUsers;
+
+      const requiredTags = [];
+      s.querySelectorAll("[data-required-tag]").forEach((cb) => {
+        if (cb.checked) requiredTags.push(cb.dataset.requiredTag);
+      });
+      data.requiredTags = requiredTags;
     } else {
       data.recurrence = "once";
       data.requiresApproval = false;
