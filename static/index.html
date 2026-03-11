@@ -956,8 +956,9 @@
 
           const app = trackerStore.app.data;
 
-          // Sync current member to app store
+          // Sync current member to app store and reset view to dashboard
           app.currentUserId = data.currentMember.id;
+          app.currentView = "dashboard";
           trackerStore.app.save();
 
           if (!app.setupComplete) {

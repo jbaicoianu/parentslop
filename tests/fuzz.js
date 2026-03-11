@@ -7,6 +7,9 @@
  *
  * Usage: node tests/fuzz.js [base_url]
  * Default base_url: http://localhost:8080
+ *
+ * NOTE: Tests must run against a freshly-started server to avoid rate limiter
+ * interference from previous runs.
  */
 
 const BASE = process.argv[2] || "http://localhost:8080";
@@ -46,13 +49,15 @@ async function rawFetch(path, opts = {}) {
 
 // Check response for security issues
 function checkResponse(r, label) {
-  // Server should never return 500 with a stack trace
-  const hasStackTrace = r.text.includes("    at ") || r.text.includes("Error:") && r.text.includes(".js:");
+  // Server should never return a stack trace (Node.js stack frame pattern)
+  const hasStackTrace = /^\s+at .+\(.+:\d+:\d+\)/m.test(r.text);
   assert(!hasStackTrace, `${label}: no stack trace leaked (status ${r.status})`);
 
-  // Should never expose internal file paths
-  const hasInternalPath = r.text.includes("/home/") || r.text.includes("/usr/") || r.text.includes("node_modules/");
-  assert(!hasInternalPath, `${label}: no internal paths leaked`);
+  // Only check for internal paths in error responses (not 200s which may contain user content)
+  if (r.status >= 400) {
+    const hasInternalPath = /(?:\/home\/|\/usr\/(?!share\/))/.test(r.text) || /node_modules\//.test(r.text);
+    assert(!hasInternalPath, `${label}: no internal paths leaked`);
+  }
 
   // Status should be a valid HTTP status
   assert(r.status >= 100 && r.status < 600, `${label}: valid HTTP status (${r.status})`);
@@ -93,7 +98,6 @@ const TYPE_CONFUSION_PAYLOADS = [
   "a".repeat(100000),
   { nested: { deep: { very: { deep: "value" } } } },
   { toString: "hacked" },
-  { __proto__: { admin: true } },
   { constructor: { prototype: { admin: true } } },
 ];
 
@@ -134,6 +138,13 @@ const BOUNDARY_BODIES = [
   'undefined',
   '',
   '{"a":'.repeat(100) + '"x"' + '}'.repeat(100), // deeply nested
+];
+
+// Prototype pollution payloads — sent as raw strings to bypass JSON.stringify stripping __proto__
+const PROTO_POLLUTION_PAYLOADS = [
+  '{"__proto__":{"admin":true}}',
+  '{"__proto__":{"isAdmin":1}}',
+  '{"constructor":{"prototype":{"admin":true}}}',
 ];
 
 // ─── Test Functions ──────────────────────────────────────────────────────────
@@ -257,6 +268,17 @@ async function fuzzStoreAPI() {
     body: { value: tooLargeValue },
   });
   checkResponse(tooLargeR, "store PUT over-limit value (5.5MB)");
+
+  // Prototype pollution via raw body
+  for (let p = 0; p < PROTO_POLLUTION_PAYLOADS.length; p++) {
+    const r = await rawFetch("/api/store/proto-test", {
+      method: "PUT",
+      cookie: family.cookie,
+      rawBody: `{"value":${PROTO_POLLUTION_PAYLOADS[p]}}`,
+      headers: { "Content-Type": "application/json" },
+    });
+    checkResponse(r, `store PUT proto pollution[${p + 1}]`);
+  }
 }
 
 async function fuzzFeedback() {
@@ -320,6 +342,25 @@ async function fuzzProtocolLevel() {
     headers: { "Content-Type": "text/plain" },
   });
   checkResponse(r2, "wrong Content-Type (text/plain)");
+
+  // Content-type fuzzing
+  const contentTypes = [
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+    "text/xml",
+    "application/xml",
+    "text/html",
+    "application/octet-stream",
+  ];
+  for (const ct of contentTypes) {
+    i++;
+    const r = await rawFetch("/api/auth/login", {
+      method: "POST",
+      rawBody: '{"familyName":"test","password":"test"}',
+      headers: { "Content-Type": ct },
+    });
+    checkResponse(r, `Content-Type: ${ct}`);
+  }
 
   // Malformed JSON bodies
   for (const body of BOUNDARY_BODIES) {
@@ -425,6 +466,85 @@ async function fuzzAuthEndpoints() {
       body: { authLevel: lvl },
     });
     checkResponse(r, `set-auth-level wrong value[${i}]`);
+  }
+
+  // Logout endpoint — use a throwaway cookie to avoid invalidating the shared session
+  const logoutR = await rawFetch("/api/auth/logout", {
+    method: "POST",
+    cookie: "session=throwaway-fuzz-session",
+  });
+  checkResponse(logoutR, "logout");
+
+  // Switch user endpoint — also use throwaway to preserve shared session
+  const switchR = await rawFetch("/api/auth/switch-user", {
+    method: "POST",
+    cookie: "session=throwaway-fuzz-session",
+  });
+  checkResponse(switchR, "switch-user (no session)");
+
+  // PATCH member with fuzz payloads
+  if (sharedFuzzFamily?.memberId) {
+    for (const payload of TYPE_CONFUSION_PAYLOADS) {
+      i++;
+      const r = await rawFetch(`/api/auth/member/${sharedFuzzFamily.memberId}`, {
+        method: "PATCH",
+        cookie: sharedFuzzFamily.cookie,
+        body: { isAdmin: payload },
+      });
+      checkResponse(r, `patch-member type[${i}]`);
+    }
+  }
+}
+
+async function fuzzMissingEndpoints() {
+  console.log("\n--- Fuzz: Additional Endpoints ---");
+
+  const family = sharedFuzzFamily;
+  if (!family?.cookie) { console.log("  SKIP (no auth)"); return; }
+
+  let i = 0;
+
+  // GET /api/feedback with fuzz
+  const fbRes = await rawFetch("/api/feedback", {
+    method: "GET",
+    cookie: family.cookie,
+  });
+  checkResponse(fbRes, "GET /api/feedback");
+
+  // POST /api/backup with fuzz
+  const backupRes = await rawFetch("/api/backup", {
+    method: "POST",
+    cookie: family.cookie,
+  });
+  checkResponse(backupRes, "POST /api/backup");
+
+  // GET /api/backups with fuzz
+  const backupsRes = await rawFetch("/api/backups", {
+    method: "GET",
+    cookie: family.cookie,
+  });
+  checkResponse(backupsRes, "GET /api/backups");
+
+  // Prototype pollution via raw body on various endpoints
+  for (const proto of PROTO_POLLUTION_PAYLOADS) {
+    i++;
+    const r = await rawFetch("/api/auth/login", {
+      method: "POST",
+      rawBody: proto,
+      headers: { "Content-Type": "application/json" },
+    });
+    checkResponse(r, `login proto pollution[${i}]`);
+  }
+
+  for (const proto of PROTO_POLLUTION_PAYLOADS) {
+    i++;
+    const r = await rawFetch("/api/feedback", {
+      method: "POST",
+      cookie: family.cookie,
+      rawBody: `{"text":"test","extra":${proto}}`,
+      headers: { "Content-Type": "application/json" },
+    });
+    checkResponse(r, `feedback proto pollution[${i}]`);
   }
 }
 
@@ -558,6 +678,7 @@ async function main() {
   await fuzzFeedback();
   await fuzzProtocolLevel();
   await fuzzAuthEndpoints();
+  await fuzzMissingEndpoints();
   await fuzzEncodingAttacks();
   await fuzzCookies();
   await verifyServerStillRunning();

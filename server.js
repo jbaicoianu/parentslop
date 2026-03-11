@@ -163,6 +163,7 @@ const loginLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  skipSuccessfulRequests: true,
   message: { error: "too many login attempts, try again later" },
 });
 
@@ -171,6 +172,7 @@ const pinLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  skipSuccessfulRequests: true,
   message: { error: "too many PIN attempts, try again later" },
 });
 
@@ -182,10 +184,27 @@ const registerLimiter = rateLimit({
   message: { error: "too many registration attempts, try again later" },
 });
 
+// --- Admin-only store keys ---------------------------------------------------
+
+const ADMIN_WRITE_KEYS = new Set([
+  "parentslop.tasks.v1",
+  "parentslop.currencies.v1",
+  "parentslop.shop.v1",
+  "parentslop.users.v1",
+]);
+
 // --- Middleware ---------------------------------------------------------------
 
 app.use(express.json({ limit: "5mb" }));
 app.use(cookieParser());
+
+// Security response headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  next();
+});
+
 app.use(express.static(path.join(__dirname, "static")));
 
 // --- Routes ------------------------------------------------------------------
@@ -201,6 +220,13 @@ app.get("/api/store/:key", requireFamilyAuth, (req, res) => {
 
 // PUT /api/store/:key — upsert a single store
 app.put("/api/store/:key", requireFamilyAuth, (req, res) => {
+  // Admin-only key authorization
+  if (ADMIN_WRITE_KEYS.has(req.params.key)) {
+    if (!req.memberId) return res.status(403).json({ error: "no member selected" });
+    const member = db.prepare("SELECT is_admin FROM family_members WHERE id = ? AND family_id = ?").get(req.memberId, req.familyId);
+    if (!member || !member.is_admin) return res.status(403).json({ error: "admin required" });
+  }
+
   const { value } = req.body;
   if (value === undefined) return res.status(400).json({ error: "missing value" });
   const now = new Date().toISOString();
@@ -215,6 +241,15 @@ app.put("/api/store/:key", requireFamilyAuth, (req, res) => {
 app.post("/api/store/sync", requireFamilyAuth, (req, res) => {
   const { stores } = req.body;
   if (!stores || typeof stores !== "object") return res.status(400).json({ error: "missing stores object" });
+
+  // Admin-only key authorization
+  const hasAdminKeys = Object.keys(stores).some(k => ADMIN_WRITE_KEYS.has(k));
+  if (hasAdminKeys) {
+    if (!req.memberId) return res.status(403).json({ error: "no member selected" });
+    const member = db.prepare("SELECT is_admin FROM family_members WHERE id = ? AND family_id = ?").get(req.memberId, req.familyId);
+    if (!member || !member.is_admin) return res.status(403).json({ error: "admin required" });
+  }
+
   const now = new Date().toISOString();
   const upsert = db.prepare(
     "INSERT INTO stores (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
@@ -547,7 +582,7 @@ app.get("/api/feedback", requireFamilyAuth, (req, res) => {
 });
 
 // PATCH /api/feedback/:id — mark feedback completed/uncompleted with optional note
-app.patch("/api/feedback/:id", requireFamilyAuth, (req, res) => {
+app.patch("/api/feedback/:id", requireFamilyAuth, requireAdmin, (req, res) => {
   const { completed, note } = req.body;
   const completedAt = completed ? new Date().toISOString() : null;
   const resolutionNote = completed ? (note || null) : null;
@@ -627,18 +662,18 @@ function listBackups() {
 }
 
 // POST /api/backup — trigger a backup
-app.post("/api/backup", requireFamilyAuth, async (req, res) => {
+app.post("/api/backup", requireFamilyAuth, requireAdmin, async (req, res) => {
   try {
     const filename = await createBackup();
     res.json({ ok: true, filename });
   } catch (err) {
     console.error("Backup failed:", err);
-    res.status(500).json({ error: "backup failed", message: err.message });
+    res.status(500).json({ error: "backup failed" });
   }
 });
 
 // GET /api/backups — list existing backups
-app.get("/api/backups", requireFamilyAuth, (req, res) => {
+app.get("/api/backups", requireFamilyAuth, requireAdmin, (req, res) => {
   res.json(listBackups());
 });
 
