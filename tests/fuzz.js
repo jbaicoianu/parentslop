@@ -6,13 +6,14 @@
  * Verifies the server never crashes and never leaks stack traces.
  *
  * Usage: node tests/fuzz.js [base_url]
- * Default base_url: http://localhost:8080
  *
- * NOTE: Tests must run against a freshly-started server to avoid rate limiter
- * interference from previous runs.
+ * If a base_url is provided, tests run against that server directly.
+ * Otherwise, a temporary server is started automatically.
  */
 
-const BASE = process.argv[2] || "http://localhost:8080";
+const { withTestServer } = require("./harness");
+
+let BASE = process.argv[2] || null;
 
 let passed = 0;
 let failed = 0;
@@ -694,7 +695,12 @@ async function main() {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((err) => {
-  console.error("Fuzz suite error:", err);
-  process.exit(1);
-});
+// If a URL was provided, run directly against it; otherwise spin up a temp server
+if (BASE) {
+  main().catch((err) => { console.error("Fuzz suite error:", err); process.exit(1); });
+} else {
+  withTestServer(async (base) => {
+    BASE = base;
+    await main();
+  }).catch((err) => { console.error("Fuzz suite error:", err); process.exit(1); });
+}

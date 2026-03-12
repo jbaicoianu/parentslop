@@ -2,15 +2,16 @@
 /**
  * ParentSlop Security Pen Test Suite
  *
- * Runs against a live server instance and verifies security properties.
+ * Spins up a temporary server with a cloned DB, runs tests, then tears down.
  * Usage: node tests/security.test.js [base_url]
- * Default base_url: http://localhost:8080
  *
- * NOTE: Tests must run against a freshly-started server to avoid rate limiter
- * interference from previous runs.
+ * If a base_url is provided, tests run against that server directly.
+ * Otherwise, a temporary server is started automatically.
  */
 
-const BASE = process.argv[2] || "http://localhost:8080";
+const { withTestServer } = require("./harness");
+
+let BASE = process.argv[2] || null;
 
 let passed = 0;
 let failed = 0;
@@ -672,7 +673,7 @@ async function testRateLimiterFunctional() {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-async function main() {
+async function runTests() {
   console.log(`\nParentSlop Security Pen Test Suite`);
   console.log(`Target: ${BASE}\n`);
 
@@ -755,7 +756,12 @@ async function main() {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((err) => {
-  console.error("Test suite error:", err);
-  process.exit(1);
-});
+// If a URL was provided, run directly against it; otherwise spin up a temp server
+if (BASE) {
+  runTests().catch((err) => { console.error("Test suite error:", err); process.exit(1); });
+} else {
+  withTestServer(async (base) => {
+    BASE = base;
+    await runTests();
+  }).catch((err) => { console.error("Test suite error:", err); process.exit(1); });
+}

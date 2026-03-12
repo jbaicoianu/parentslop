@@ -11,7 +11,11 @@ const PORT = process.env.PORT || 8080;
 
 // --- SQLite setup ------------------------------------------------------------
 
-const db = new Database(path.join(__dirname, "parentslop.db"));
+const dbArg = process.argv.indexOf("--db");
+const DB_PATH = dbArg !== -1 && process.argv[dbArg + 1]
+  ? path.resolve(process.argv[dbArg + 1])
+  : path.join(__dirname, "parentslop.db");
+const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.exec(`
   CREATE TABLE IF NOT EXISTS stores (
@@ -743,8 +747,9 @@ app.use((err, req, res, _next) => {
 // --- Start -------------------------------------------------------------------
 
 migrateExistingData().then(() => {
-  app.listen(PORT, () => {
-    console.log(`ParentSlop server running on http://localhost:${PORT}`);
+  const server = app.listen(PORT, () => {
+    const actualPort = server.address().port;
+    console.log(`ParentSlop server running on http://localhost:${actualPort}`);
     // Run initial backup on startup
     createBackup().catch(err => console.error("Startup backup failed:", err));
   });
