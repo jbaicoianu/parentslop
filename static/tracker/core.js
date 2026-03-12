@@ -507,7 +507,7 @@ function createTask(data) {
     streakBonus: data.streakBonus || null, // { threshold, multiplier }
     timerBonus: data.timerBonus || null, // { targetSeconds, multiplier }
     bonusCriteria: data.bonusCriteria || null, // [{ id, label, multiplier }]
-    category: data.category || "routine", // "routine" | "jobboard"
+    category: data.category || (data.recurrence === "transient" ? "jobboard" : "routine"), // "routine" | "jobboard"
     payType: data.payType || "fixed", // "fixed" | "hourly"
     requiredTags: data.requiredTags || [], // tags required for task visibility
     activeDays: data.activeDays || [], // day numbers (0=Sun..6=Sat); empty = every day
@@ -1184,6 +1184,11 @@ usersStore.load();
 appStore.load();
 currencyStore.load();
 taskStore.load();
+// Migrate existing transient tasks from routine to jobboard
+taskStore.data.forEach((t) => {
+  if (t.recurrence === "transient" && t.category === "routine") t.category = "jobboard";
+});
+taskStore.save();
 completionStore.load();
 shopStore.load();
 redemptionStore.load();

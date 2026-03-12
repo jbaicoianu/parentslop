@@ -566,6 +566,11 @@ class PsAdminTasks extends HTMLElement {
     if (recurrenceEl && activeDaysRow) {
       recurrenceEl.addEventListener("change", () => {
         activeDaysRow.style.display = recurrenceEl.value === "daily" ? "" : "none";
+        // Auto-switch category to jobboard when transient is selected
+        if (recurrenceEl.value === "transient" && categoryEl) {
+          categoryEl.value = "jobboard";
+          categoryEl.dispatchEvent(new Event("change"));
+        }
       });
     }
 
@@ -652,7 +657,7 @@ class PsAdminTasks extends HTMLElement {
         data.activeDays = [];
       }
 
-      data.category = s.getElementById("f-category").value;
+      data.category = data.recurrence === "transient" ? "jobboard" : s.getElementById("f-category").value;
       data.requiresApproval = s.getElementById("f-approval").checked;
 
       if (data.category === "jobboard") {
