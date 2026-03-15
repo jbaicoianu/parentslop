@@ -125,6 +125,19 @@ Resources:
                   - elasticfilesystem:ClientMount
                   - elasticfilesystem:ClientWrite
                 Resource: !GetAtt EFSFileSystem.Arn
+        - PolicyName: s3-backups
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::parentslop-backups-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::parentslop-backups-${AWS::AccountId}/*'
         - PolicyName: ssm-exec
           PolicyDocument:
             Version: '2012-10-17'
@@ -190,6 +203,9 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
+          Environment:
+            - Name: BACKUP_BUCKET
+              Value: !Sub 'parentslop-backups-${AWS::AccountId}'
           Essential: true
 
   # --- Service Discovery (Cloud Map) ---
@@ -354,3 +370,5 @@ Outputs:
     Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
   EFSFileSystemId:
     Value: !Ref EFSFileSystem
+  BackupBucket:
+    Value: !Sub 'parentslop-backups-${AWS::AccountId}'

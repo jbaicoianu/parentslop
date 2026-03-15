@@ -5,8 +5,11 @@ const fs = require("fs");
 const crypto = require("crypto");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
+const { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
 const CRSQLITE_EXT = path.join(__dirname, "node_modules/@vlcn.io/crsqlite/dist/crsqlite");
+const BACKUP_BUCKET = process.env.BACKUP_BUCKET || null;
+const s3 = BACKUP_BUCKET ? new S3Client() : null;
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -17,139 +20,184 @@ const dbArg = process.argv.indexOf("--db");
 const DB_PATH = dbArg !== -1 && process.argv[dbArg + 1]
   ? path.resolve(process.argv[dbArg + 1])
   : path.join(__dirname, "parentslop.db");
-const db = new Database(DB_PATH);
-db.loadExtension(CRSQLITE_EXT);
-db.pragma("journal_mode = WAL");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS stores (
-    key TEXT NOT NULL PRIMARY KEY,
-    value TEXT,
-    updated_at TEXT
-  )
-`);
-db.exec(`
-  CREATE TABLE IF NOT EXISTS feedback (
-    id TEXT NOT NULL PRIMARY KEY,
-    family_id TEXT,
-    text TEXT DEFAULT '',
-    user_id TEXT,
-    user_name TEXT,
-    current_view TEXT,
-    user_agent TEXT,
-    created_at TEXT,
-    completed_at TEXT,
-    resolution_note TEXT
-  )
-`);
 
-// Migrate: add completed_at and resolution_note columns if missing (existing databases)
-try {
-  db.prepare("SELECT completed_at FROM feedback LIMIT 1").get();
-} catch {
-  db.exec("ALTER TABLE feedback ADD COLUMN completed_at TEXT");
-}
-try {
-  db.prepare("SELECT resolution_note FROM feedback LIMIT 1").get();
-} catch {
-  db.exec("ALTER TABLE feedback ADD COLUMN resolution_note TEXT");
-}
-try {
-  db.prepare("SELECT family_id FROM feedback LIMIT 1").get();
-} catch {
-  db.exec("ALTER TABLE feedback ADD COLUMN family_id TEXT");
-}
-
-// --- Auth tables -------------------------------------------------------------
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS families (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    slug TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    salt TEXT NOT NULL,
-    auth_level TEXT NOT NULL DEFAULT 'none',
-    needs_password_reset INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS family_members (
-    id TEXT PRIMARY KEY,
-    family_id TEXT NOT NULL REFERENCES families(id),
-    display_name TEXT NOT NULL,
-    is_admin INTEGER NOT NULL DEFAULT 0,
-    pin_hash TEXT,
-    password_hash TEXT,
-    salt TEXT,
-    created_at TEXT NOT NULL
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    family_id TEXT NOT NULL REFERENCES families(id),
-    member_id TEXT,
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
-  )
-`);
-
-// --- CR-SQLite CRR setup -----------------------------------------------------
-
-// Migrate existing tables for cr-sqlite compatibility:
-// - PK columns must be NOT NULL
-// - Non-PK NOT NULL columns must have a DEFAULT value
-function migrateToCrrCompatible(tableName, pkCol) {
-  const cols = db.pragma(`table_info(${tableName})`);
-  const pk = cols.find(c => c.name === pkCol);
-  const needsPkFix = pk && !pk.notnull;
-  const needsNotNullFix = cols.some(c => !c.pk && c.notnull && c.dflt_value === null);
-
-  if (!needsPkFix && !needsNotNullFix) return;
-
-  console.log(`Migrating ${tableName} for cr-sqlite compatibility`);
-  const colDefs = cols.map(c => {
-    let def = `${c.name} ${c.type || 'TEXT'}`;
-    if (c.pk) {
-      def += ' NOT NULL PRIMARY KEY';
-    } else if (c.notnull && c.dflt_value === null) {
-      // Make nullable (cr-sqlite requires default for NOT NULL non-PK cols)
-      def += ` DEFAULT ''`;
-    } else {
-      if (c.notnull) def += ' NOT NULL';
-      if (c.dflt_value !== null) def += ` DEFAULT ${c.dflt_value}`;
+// Check DB integrity before doing anything else. If corrupt, try restoring from S3.
+async function ensureHealthyDb() {
+  if (!fs.existsSync(DB_PATH)) return;
+  let testDb;
+  try {
+    // Clean up stale WAL/SHM files first (can cause I/O errors on network storage)
+    for (const suf of ["-wal", "-shm"]) {
+      const f = DB_PATH + suf;
+      if (fs.existsSync(f)) {
+        console.log(`Removing stale ${suf} file`);
+        fs.unlinkSync(f);
+      }
     }
-    return def;
-  }).join(', ');
-  db.exec(`CREATE TABLE ${tableName}_migrate (${colDefs})`);
-  db.exec(`INSERT INTO ${tableName}_migrate SELECT * FROM ${tableName}`);
-  db.exec(`DROP TABLE ${tableName}`);
-  db.exec(`ALTER TABLE ${tableName}_migrate RENAME TO ${tableName}`);
+    testDb = new Database(DB_PATH);
+    testDb.loadExtension(CRSQLITE_EXT);
+    const result = testDb.pragma("integrity_check");
+    if (result[0]?.integrity_check !== "ok") throw new Error(`integrity_check: ${result[0]?.integrity_check}`);
+    // Also verify tables are actually readable
+    testDb.prepare("SELECT count(*) FROM stores").get();
+    testDb.prepare("SELECT count(*) FROM feedback").get();
+    try { testDb.exec("SELECT crsql_finalize()"); } catch {}
+    testDb.close();
+  } catch (e) {
+    if (testDb) try { testDb.exec("SELECT crsql_finalize()"); } catch {}
+    if (testDb) try { testDb.close(); } catch {}
+    console.error(`DB corrupt: ${e.message}`);
+    if (!s3) { console.error("No BACKUP_BUCKET configured — cannot auto-restore"); return; }
+    console.log("Attempting restore from S3...");
+    try {
+      const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
+      const backups = (list.Contents || []).sort((a, b) => b.LastModified - a.LastModified);
+      if (backups.length === 0) { console.error("No backups found in S3"); return; }
+      const latest = backups[0];
+      console.log(`Restoring from ${latest.Key} (${latest.LastModified.toISOString()})`);
+      const resp = await s3.send(new GetObjectCommand({ Bucket: BACKUP_BUCKET, Key: latest.Key }));
+      const chunks = []; for await (const chunk of resp.Body) chunks.push(chunk);
+      // Move corrupt DB aside
+      fs.renameSync(DB_PATH, DB_PATH + ".corrupt");
+      for (const suf of ["-wal", "-shm"]) { try { fs.unlinkSync(DB_PATH + suf); } catch {} }
+      fs.writeFileSync(DB_PATH, Buffer.concat(chunks));
+      console.log("Restore complete");
+    } catch (restoreErr) {
+      console.error("Restore failed:", restoreErr.message);
+    }
+  }
 }
 
-migrateToCrrCompatible('stores', 'key');
-migrateToCrrCompatible('feedback', 'id');
+// DB is opened in initDb(), called during async startup after integrity check.
+let db;
 
-// Mark tables as CRRs (idempotent — no-ops if already CRRs)
-try { db.exec("SELECT crsql_as_crr('stores')"); } catch (e) {
-  if (!e.message.includes('already')) throw e;
-}
-try { db.exec("SELECT crsql_as_crr('feedback')"); } catch (e) {
-  if (!e.message.includes('already')) throw e;
-}
+function initDb() {
+  db = new Database(DB_PATH);
+  db.loadExtension(CRSQLITE_EXT);
+  db.pragma("journal_mode = WAL");
+  db.pragma("locking_mode = EXCLUSIVE"); // Required for NFS/EFS — avoids shared memory issues
 
-// Local bookkeeping for sync state (NOT a CRR)
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sync_state (
-    peer_url TEXT PRIMARY KEY,
-    last_pushed_version INTEGER DEFAULT 0,
-    last_pulled_version INTEGER DEFAULT 0,
-    last_sync_at TEXT
-  )
-`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stores (
+      key TEXT NOT NULL PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id TEXT NOT NULL PRIMARY KEY,
+      family_id TEXT,
+      text TEXT DEFAULT '',
+      user_id TEXT,
+      user_name TEXT,
+      current_view TEXT,
+      user_agent TEXT,
+      created_at TEXT,
+      completed_at TEXT,
+      resolution_note TEXT
+    )
+  `);
+
+  // Migrate: add columns if missing (existing databases)
+  try { db.prepare("SELECT completed_at FROM feedback LIMIT 1").get(); } catch {
+    db.exec("ALTER TABLE feedback ADD COLUMN completed_at TEXT");
+  }
+  try { db.prepare("SELECT resolution_note FROM feedback LIMIT 1").get(); } catch {
+    db.exec("ALTER TABLE feedback ADD COLUMN resolution_note TEXT");
+  }
+  try { db.prepare("SELECT family_id FROM feedback LIMIT 1").get(); } catch {
+    db.exec("ALTER TABLE feedback ADD COLUMN family_id TEXT");
+  }
+
+  // --- Auth tables ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS families (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      auth_level TEXT NOT NULL DEFAULT 'none',
+      needs_password_reset INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS family_members (
+      id TEXT PRIMARY KEY,
+      family_id TEXT NOT NULL REFERENCES families(id),
+      display_name TEXT NOT NULL,
+      is_admin INTEGER NOT NULL DEFAULT 0,
+      pin_hash TEXT,
+      password_hash TEXT,
+      salt TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      family_id TEXT NOT NULL REFERENCES families(id),
+      member_id TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    )
+  `);
+
+  // --- CR-SQLite CRR setup ---
+  // Migrate existing tables for cr-sqlite compatibility (in a transaction for safety):
+  // - PK columns must be NOT NULL
+  // - Non-PK NOT NULL columns must have a DEFAULT value
+  function migrateToCrrCompatible(tableName, pkCol) {
+    const cols = db.pragma(`table_info(${tableName})`);
+    const pk = cols.find(c => c.name === pkCol);
+    const needsPkFix = pk && !pk.notnull;
+    const needsNotNullFix = cols.some(c => !c.pk && c.notnull && c.dflt_value === null);
+    if (!needsPkFix && !needsNotNullFix) return;
+
+    console.log(`Migrating ${tableName} for cr-sqlite compatibility`);
+    const colDefs = cols.map(c => {
+      let def = `${c.name} ${c.type || 'TEXT'}`;
+      if (c.pk) {
+        def += ' NOT NULL PRIMARY KEY';
+      } else if (c.notnull && c.dflt_value === null) {
+        def += ` DEFAULT ''`;
+      } else {
+        if (c.notnull) def += ' NOT NULL';
+        if (c.dflt_value !== null) def += ` DEFAULT ${c.dflt_value}`;
+      }
+      return def;
+    }).join(', ');
+    db.transaction(() => {
+      db.exec(`CREATE TABLE ${tableName}_migrate (${colDefs})`);
+      db.exec(`INSERT INTO ${tableName}_migrate SELECT * FROM ${tableName}`);
+      db.exec(`DROP TABLE ${tableName}`);
+      db.exec(`ALTER TABLE ${tableName}_migrate RENAME TO ${tableName}`);
+    })();
+  }
+
+  migrateToCrrCompatible('stores', 'key');
+  migrateToCrrCompatible('feedback', 'id');
+
+  // Mark tables as CRRs (idempotent — no-ops if already CRRs)
+  try { db.exec("SELECT crsql_as_crr('stores')"); } catch (e) {
+    if (!e.message.includes('already')) throw e;
+  }
+  try { db.exec("SELECT crsql_as_crr('feedback')"); } catch (e) {
+    if (!e.message.includes('already')) throw e;
+  }
+
+  // Local bookkeeping for sync state (NOT a CRR)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_state (
+      peer_url TEXT PRIMARY KEY,
+      last_pushed_version INTEGER DEFAULT 0,
+      last_pulled_version INTEGER DEFAULT 0,
+      last_sync_at TEXT
+    )
+  `);
+}
 
 // --- Password hashing utilities ----------------------------------------------
 
@@ -778,71 +826,68 @@ if (SYNC_PEERS.length > 0 && SYNC_SECRET) {
   console.log(`Sync: will sync with ${SYNC_PEERS.join(", ")} every ${SYNC_INTERVAL_MS / 1000}s`);
 }
 
-// --- Backups -----------------------------------------------------------------
+// --- Backups (S3) ------------------------------------------------------------
 
-const BACKUP_DIR = path.join(__dirname, "backups");
-fs.mkdirSync(BACKUP_DIR, { recursive: true });
+const LOCAL_BACKUP_DIR = path.join(__dirname, "backups");
+fs.mkdirSync(LOCAL_BACKUP_DIR, { recursive: true });
 
 async function createBackup() {
   const timestamp = new Date().toISOString().replace(/:/g, "-").replace(/\.\d+Z$/, "");
   const filename = `parentslop-${timestamp}.db`;
-  const dest = path.join(BACKUP_DIR, filename);
-  await db.backup(dest);
+  const localDest = path.join(LOCAL_BACKUP_DIR, filename);
+  await db.backup(localDest);
   try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch (e) { console.warn("WAL checkpoint warning:", e.message); }
-  rotateBackups();
+
+  // Upload to S3 if configured
+  if (s3) {
+    try {
+      const body = fs.readFileSync(localDest);
+      await s3.send(new PutObjectCommand({ Bucket: BACKUP_BUCKET, Key: `backups/${filename}`, Body: body }));
+      console.log(`Backup uploaded to S3: ${filename}`);
+    } catch (e) {
+      console.error(`S3 upload failed: ${e.message} (local backup kept at ${localDest})`);
+      return filename;
+    }
+  }
+
+  // Clean up local file (S3 is the durable copy)
+  try { fs.unlinkSync(localDest); } catch {}
+
+  // Rotate S3 backups: keep last 30
+  if (s3) {
+    try {
+      const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
+      const sorted = (list.Contents || []).sort((a, b) => b.LastModified - a.LastModified);
+      for (const old of sorted.slice(30)) {
+        await s3.send(new DeleteObjectCommand({ Bucket: BACKUP_BUCKET, Key: old.Key }));
+        console.log(`S3 backup rotated: ${old.Key}`);
+      }
+    } catch (e) {
+      console.warn("S3 rotation warning:", e.message);
+    }
+  }
+
   console.log(`Backup created: ${filename}`);
   return filename;
 }
 
-function rotateBackups() {
-  const files = fs.readdirSync(BACKUP_DIR)
-    .filter(f => f.startsWith("parentslop-") && f.endsWith(".db"))
-    .map(f => ({ name: f, time: fs.statSync(path.join(BACKUP_DIR, f)).mtime }))
-    .sort((a, b) => b.time - a.time); // newest first
-
-  const now = new Date();
-  const msPerDay = 86400000;
-  const keep = new Set();
-
-  // Keep all backups from the last 7 days
-  for (const f of files) {
-    if (now - f.time < 7 * msPerDay) keep.add(f.name);
-  }
-
-  // Keep the most recent backup from each of the prior 4 calendar weeks
-  const weeksKept = new Set();
-  for (const f of files) {
-    if (keep.has(f.name)) continue;
-    const age = now - f.time;
-    if (age >= 7 * msPerDay && age < 35 * msPerDay) {
-      // Get ISO week identifier
-      const d = new Date(f.time);
-      const jan1 = new Date(d.getFullYear(), 0, 1);
-      const weekNum = Math.ceil(((d - jan1) / msPerDay + jan1.getDay() + 1) / 7);
-      const weekKey = `${d.getFullYear()}-W${weekNum}`;
-      if (!weeksKept.has(weekKey)) {
-        weeksKept.add(weekKey);
-        keep.add(f.name);
-        if (weeksKept.size >= 4) break;
-      }
+async function listBackups() {
+  if (s3) {
+    try {
+      const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
+      return (list.Contents || [])
+        .sort((a, b) => b.LastModified - a.LastModified)
+        .map(o => ({ filename: o.Key.replace("backups/", ""), size: o.Size, created: o.LastModified.toISOString() }));
+    } catch (e) {
+      console.error("S3 list failed:", e.message);
     }
   }
-
-  // Delete everything not in the keep set
-  for (const f of files) {
-    if (!keep.has(f.name)) {
-      fs.unlinkSync(path.join(BACKUP_DIR, f.name));
-      console.log(`Backup rotated out: ${f.name}`);
-    }
-  }
-}
-
-function listBackups() {
-  if (!fs.existsSync(BACKUP_DIR)) return [];
-  return fs.readdirSync(BACKUP_DIR)
+  // Fallback to local
+  if (!fs.existsSync(LOCAL_BACKUP_DIR)) return [];
+  return fs.readdirSync(LOCAL_BACKUP_DIR)
     .filter(f => f.startsWith("parentslop-") && f.endsWith(".db"))
     .map(f => {
-      const stat = fs.statSync(path.join(BACKUP_DIR, f));
+      const stat = fs.statSync(path.join(LOCAL_BACKUP_DIR, f));
       return { filename: f, size: stat.size, created: stat.mtime.toISOString() };
     })
     .sort((a, b) => b.created.localeCompare(a.created));
@@ -860,8 +905,8 @@ app.post("/api/backup", requireFamilyAuth, requireAdmin, async (req, res) => {
 });
 
 // GET /api/backups — list existing backups
-app.get("/api/backups", requireFamilyAuth, requireAdmin, (req, res) => {
-  res.json(listBackups());
+app.get("/api/backups", requireFamilyAuth, requireAdmin, async (req, res) => {
+  res.json(await listBackups());
 });
 
 // Schedule backup every 6 hours
@@ -929,7 +974,10 @@ app.use((err, req, res, _next) => {
 
 // --- Start -------------------------------------------------------------------
 
-migrateExistingData().then(() => {
+ensureHealthyDb().then(() => {
+  initDb();
+  return migrateExistingData();
+}).then(() => {
   const server = app.listen(PORT, () => {
     const actualPort = server.address().port;
     console.log(`ParentSlop server running on http://localhost:${actualPort}`);

@@ -6,6 +6,7 @@
     "start:dev": "nodemon --watch server.js --watch tracker/ --ext js,json,html server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1009.0",
     "@vlcn.io/crsqlite": "^0.16.3",
     "better-sqlite3": "^11.7.0",
     "cookie-parser": "^1.4.7",
