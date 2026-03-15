@@ -6,6 +6,8 @@ const crypto = require("crypto");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 
+const CRSQLITE_EXT = path.join(__dirname, "node_modules/@vlcn.io/crsqlite/dist/crsqlite");
+
 const app = express();
 const PORT = process.env.PORT || 8080;
 
@@ -16,19 +18,20 @@ const DB_PATH = dbArg !== -1 && process.argv[dbArg + 1]
   ? path.resolve(process.argv[dbArg + 1])
   : path.join(__dirname, "parentslop.db");
 const db = new Database(DB_PATH);
+db.loadExtension(CRSQLITE_EXT);
 db.pragma("journal_mode = WAL");
 db.exec(`
   CREATE TABLE IF NOT EXISTS stores (
-    key TEXT PRIMARY KEY,
+    key TEXT NOT NULL PRIMARY KEY,
     value TEXT,
     updated_at TEXT
   )
 `);
 db.exec(`
   CREATE TABLE IF NOT EXISTS feedback (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL PRIMARY KEY,
     family_id TEXT,
-    text TEXT NOT NULL,
+    text TEXT DEFAULT '',
     user_id TEXT,
     user_name TEXT,
     current_view TEXT,
@@ -91,6 +94,60 @@ db.exec(`
     member_id TEXT,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
+  )
+`);
+
+// --- CR-SQLite CRR setup -----------------------------------------------------
+
+// Migrate existing tables for cr-sqlite compatibility:
+// - PK columns must be NOT NULL
+// - Non-PK NOT NULL columns must have a DEFAULT value
+function migrateToCrrCompatible(tableName, pkCol) {
+  const cols = db.pragma(`table_info(${tableName})`);
+  const pk = cols.find(c => c.name === pkCol);
+  const needsPkFix = pk && !pk.notnull;
+  const needsNotNullFix = cols.some(c => !c.pk && c.notnull && c.dflt_value === null);
+
+  if (!needsPkFix && !needsNotNullFix) return;
+
+  console.log(`Migrating ${tableName} for cr-sqlite compatibility`);
+  const colDefs = cols.map(c => {
+    let def = `${c.name} ${c.type || 'TEXT'}`;
+    if (c.pk) {
+      def += ' NOT NULL PRIMARY KEY';
+    } else if (c.notnull && c.dflt_value === null) {
+      // Make nullable (cr-sqlite requires default for NOT NULL non-PK cols)
+      def += ` DEFAULT ''`;
+    } else {
+      if (c.notnull) def += ' NOT NULL';
+      if (c.dflt_value !== null) def += ` DEFAULT ${c.dflt_value}`;
+    }
+    return def;
+  }).join(', ');
+  db.exec(`CREATE TABLE ${tableName}_migrate (${colDefs})`);
+  db.exec(`INSERT INTO ${tableName}_migrate SELECT * FROM ${tableName}`);
+  db.exec(`DROP TABLE ${tableName}`);
+  db.exec(`ALTER TABLE ${tableName}_migrate RENAME TO ${tableName}`);
+}
+
+migrateToCrrCompatible('stores', 'key');
+migrateToCrrCompatible('feedback', 'id');
+
+// Mark tables as CRRs (idempotent — no-ops if already CRRs)
+try { db.exec("SELECT crsql_as_crr('stores')"); } catch (e) {
+  if (!e.message.includes('already')) throw e;
+}
+try { db.exec("SELECT crsql_as_crr('feedback')"); } catch (e) {
+  if (!e.message.includes('already')) throw e;
+}
+
+// Local bookkeeping for sync state (NOT a CRR)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sync_state (
+    peer_url TEXT PRIMARY KEY,
+    last_pushed_version INTEGER DEFAULT 0,
+    last_pulled_version INTEGER DEFAULT 0,
+    last_sync_at TEXT
   )
 `);
 
@@ -595,6 +652,132 @@ app.patch("/api/feedback/:id", requireFamilyAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Sync (cr-sqlite pod-to-pod) ---------------------------------------------
+
+const SYNC_SECRET = process.env.SYNC_SECRET || null;
+const SYNC_PEERS = (process.env.SYNC_PEERS || "").split(",").map(s => s.trim()).filter(Boolean);
+const SYNC_INTERVAL_MS = (parseInt(process.env.SYNC_INTERVAL_MIN, 10) || 5) * 60 * 1000;
+
+function requireSyncAuth(req, res, next) {
+  if (!SYNC_SECRET) return res.status(503).json({ error: "sync not configured" });
+  if (req.headers["x-sync-secret"] !== SYNC_SECRET) return res.status(401).json({ error: "invalid sync secret" });
+  next();
+}
+
+// GET /api/sync/version — current db_version and site_id
+app.get("/api/sync/version", requireSyncAuth, (req, res) => {
+  const dbVersion = db.prepare("SELECT crsql_db_version()").pluck().get();
+  const siteId = db.prepare("SELECT crsql_site_id()").pluck().get();
+  res.json({ dbVersion, siteId: siteId.toString("hex") });
+});
+
+// GET /api/sync/changes?since=<db_version> — changes since a version
+app.get("/api/sync/changes", requireSyncAuth, (req, res) => {
+  const since = parseInt(req.query.since, 10) || 0;
+  const changes = db.prepare("SELECT * FROM crsql_changes WHERE db_version > ?").all(since);
+  const dbVersion = db.prepare("SELECT crsql_db_version()").pluck().get();
+  // Encode binary fields as hex for JSON transport
+  const encoded = changes.map(c => ({
+    ...c,
+    pk: Buffer.isBuffer(c.pk) ? c.pk.toString("hex") : c.pk,
+    site_id: Buffer.isBuffer(c.site_id) ? c.site_id.toString("hex") : c.site_id,
+  }));
+  res.json({ changes: encoded, currentVersion: dbVersion });
+});
+
+// POST /api/sync/changes — apply changes from a peer
+app.post("/api/sync/changes", requireSyncAuth, (req, res) => {
+  const { changes } = req.body;
+  if (!Array.isArray(changes)) return res.status(400).json({ error: "changes must be an array" });
+  const insert = db.prepare(
+    "INSERT INTO crsql_changes (\"table\", pk, cid, val, col_version, db_version, site_id, cl, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  );
+  const applyAll = db.transaction((rows) => {
+    for (const c of rows) {
+      insert.run(
+        c.table,
+        Buffer.from(c.pk, "hex"),
+        c.cid,
+        c.val,
+        c.col_version,
+        c.db_version,
+        Buffer.from(c.site_id, "hex"),
+        c.cl,
+        c.seq
+      );
+    }
+  });
+  applyAll(changes);
+  res.json({ ok: true, applied: changes.length });
+});
+
+// Background sync worker
+async function syncWithPeer(peerUrl) {
+  const headers = { "x-sync-secret": SYNC_SECRET, "Content-Type": "application/json" };
+  const state = db.prepare("SELECT * FROM sync_state WHERE peer_url = ?").get(peerUrl) || {
+    last_pushed_version: 0,
+    last_pulled_version: 0,
+  };
+
+  // Pull: get changes from peer since our last pull
+  const pullResp = await fetch(`${peerUrl}/api/sync/changes?since=${state.last_pulled_version}`, { headers });
+  if (!pullResp.ok) throw new Error(`Pull failed: ${pullResp.status}`);
+  const pullData = await pullResp.json();
+  if (pullData.changes.length > 0) {
+    const insert = db.prepare(
+      "INSERT INTO crsql_changes (\"table\", pk, cid, val, col_version, db_version, site_id, cl, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    const applyAll = db.transaction((rows) => {
+      for (const c of rows) {
+        insert.run(c.table, Buffer.from(c.pk, "hex"), c.cid, c.val, c.col_version, c.db_version, Buffer.from(c.site_id, "hex"), c.cl, c.seq);
+      }
+    });
+    applyAll(pullData.changes);
+    console.log(`Sync: pulled ${pullData.changes.length} changes from ${peerUrl}`);
+  }
+
+  // Push: send our changes since peer's last known version
+  const ourChanges = db.prepare("SELECT * FROM crsql_changes WHERE db_version > ?").all(state.last_pushed_version);
+  if (ourChanges.length > 0) {
+    const encoded = ourChanges.map(c => ({
+      ...c,
+      pk: Buffer.isBuffer(c.pk) ? c.pk.toString("hex") : c.pk,
+      site_id: Buffer.isBuffer(c.site_id) ? c.site_id.toString("hex") : c.site_id,
+    }));
+    const pushResp = await fetch(`${peerUrl}/api/sync/changes`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ changes: encoded }),
+    });
+    if (!pushResp.ok) throw new Error(`Push failed: ${pushResp.status}`);
+    console.log(`Sync: pushed ${ourChanges.length} changes to ${peerUrl}`);
+  }
+
+  // Update sync state
+  const ourVersion = db.prepare("SELECT crsql_db_version()").pluck().get();
+  db.prepare(
+    "INSERT INTO sync_state (peer_url, last_pushed_version, last_pulled_version, last_sync_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(peer_url) DO UPDATE SET last_pushed_version = excluded.last_pushed_version, last_pulled_version = excluded.last_pulled_version, last_sync_at = excluded.last_sync_at"
+  ).run(peerUrl, ourVersion, pullData.currentVersion);
+}
+
+async function syncAllPeers() {
+  for (const peer of SYNC_PEERS) {
+    try {
+      await syncWithPeer(peer);
+    } catch (err) {
+      console.error(`Sync error with ${peer}:`, err.message);
+    }
+  }
+}
+
+let syncInterval = null;
+if (SYNC_PEERS.length > 0 && SYNC_SECRET) {
+  // Initial sync after a short delay (let server finish starting)
+  setTimeout(() => syncAllPeers(), 5000);
+  syncInterval = setInterval(() => syncAllPeers(), SYNC_INTERVAL_MS);
+  console.log(`Sync: will sync with ${SYNC_PEERS.join(", ")} every ${SYNC_INTERVAL_MS / 1000}s`);
+}
+
 // --- Backups -----------------------------------------------------------------
 
 const BACKUP_DIR = path.join(__dirname, "backups");
@@ -753,6 +936,16 @@ migrateExistingData().then(() => {
     // Run initial backup on startup
     createBackup().catch(err => console.error("Startup backup failed:", err));
   });
+
+  function shutdown() {
+    console.log("Shutting down...");
+    if (syncInterval) clearInterval(syncInterval);
+    try { db.exec("SELECT crsql_finalize()"); } catch (e) { /* ignore if already finalized */ }
+    db.close();
+    process.exit(0);
+  }
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 }).catch((err) => {
   console.error("Migration failed:", err);
   process.exit(1);
