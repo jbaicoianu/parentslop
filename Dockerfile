@@ -2,11 +2,11 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install build tools for better-sqlite3 native addon
-RUN apk add --no-cache python3 make g++
+# Install build tools for better-sqlite3 native addon, unzip for crsqlite prebuilt binary
+RUN apk add --no-cache python3 make g++ unzip
 
 COPY package.json package-lock.json ./
-RUN npm ci --production && apk del python3 make g++
+RUN npm ci --production && apk del python3 make g++ unzip
 
 COPY server.js ./
 COPY static/ ./static/
