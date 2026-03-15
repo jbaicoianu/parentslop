@@ -104,6 +104,15 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ssm-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/parentslop/*'
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -206,6 +215,9 @@ Resources:
           Environment:
             - Name: BACKUP_BUCKET
               Value: !Sub 'parentslop-backups-${AWS::AccountId}'
+          Secrets:
+            - Name: SYNC_SECRET
+              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/parentslop/sync-secret'
           Essential: true
 
   # --- Service Discovery (Cloud Map) ---
