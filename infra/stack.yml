@@ -215,6 +215,8 @@ Resources:
           Environment:
             - Name: BACKUP_BUCKET
               Value: !Sub 'parentslop-backups-${AWS::AccountId}'
+            - Name: NODE_ENV
+              Value: production
           Secrets:
             - Name: SYNC_SECRET
               ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/parentslop/sync-secret'

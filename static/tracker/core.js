@@ -129,6 +129,11 @@ class TrackerStore {
         bus.emit("auth:required");
         return;
       }
+      if (!res.ok) {
+        console.warn(`TrackerStore: server rejected save for ${this._key} (${res.status})`);
+        this._setDirty(true);
+        return;
+      }
       this._setDirty(false);
       bus.emit("server:reachable");
     } catch (e) {

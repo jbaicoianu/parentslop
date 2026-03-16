@@ -26,13 +26,14 @@ async function ensureHealthyDb() {
   if (!fs.existsSync(DB_PATH)) return;
   let testDb;
   try {
-    // Clean up stale WAL/SHM files first (can cause I/O errors on network storage)
-    for (const suf of ["-wal", "-shm"]) {
-      const f = DB_PATH + suf;
-      if (fs.existsSync(f)) {
-        console.log(`Removing stale ${suf} file`);
-        fs.unlinkSync(f);
-      }
+    // Clean up stale SHM file (shared-memory index — safely reconstructed by SQLite).
+    // Do NOT delete the WAL file: it may contain committed transactions that haven't
+    // been checkpointed into the main DB yet (e.g. recent sessions). SQLite will
+    // replay/recover it automatically on open.
+    const shmPath = DB_PATH + "-shm";
+    if (fs.existsSync(shmPath)) {
+      console.log("Removing stale -shm file");
+      fs.unlinkSync(shmPath);
     }
     testDb = new Database(DB_PATH);
     testDb.loadExtension(CRSQLITE_EXT);
@@ -299,7 +300,8 @@ const ADMIN_WRITE_KEYS = new Set([
   "parentslop.tasks.v1",
   "parentslop.currencies.v1",
   "parentslop.shop.v1",
-  "parentslop.users.v1",
+  // Note: parentslop.users.v1 is NOT admin-only because kids need to persist
+  // balance changes when completing tasks (adjustBalance → usersStore.save).
 ]);
 
 // --- Middleware ---------------------------------------------------------------
