@@ -84,9 +84,11 @@ class TrackerStore {
       const row = await res.json();
       this._data = JSON.parse(row.value);
       localStorage.setItem(this._key, row.value);
+      bus.emit("server:reachable");
       return true;
     } catch (e) {
       console.warn(`TrackerStore: server fetch failed for ${this._key}, using localStorage`, e);
+      bus.emit("server:unreachable");
       this.load();
       return false;
     }
@@ -102,8 +104,10 @@ class TrackerStore {
       if (res.status === 401) {
         bus.emit("auth:required");
       }
+      bus.emit("server:reachable");
     } catch (e) {
       console.warn(`TrackerStore: server persist failed for ${this._key}`, e);
+      bus.emit("server:unreachable");
     }
   }
 

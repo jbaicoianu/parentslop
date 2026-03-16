@@ -4,6 +4,8 @@ class PsNavBar extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._unsubs = [];
+    this._offline = false;
+    this._healthCheckInterval = null;
   }
 
   connectedCallback() {
@@ -12,11 +14,15 @@ class PsNavBar extends HTMLElement {
       eventBus.on("nav:changed", () => this.render()),
       eventBus.on("completion:added", () => this.render()),
       eventBus.on("completion:approved", () => this.render()),
+      eventBus.on("server:unreachable", () => this._setOffline(true)),
+      eventBus.on("server:reachable", () => this._setOffline(false)),
     );
-    this._onOnline = () => this._updateOfflineIndicator(false);
-    this._onOffline = () => this._updateOfflineIndicator(true);
+    this._onOnline = () => this._checkServer();
+    this._onOffline = () => this._setOffline(true);
     window.addEventListener("online", this._onOnline);
     window.addEventListener("offline", this._onOffline);
+    if (!navigator.onLine) this._offline = true;
+    this._healthCheckInterval = setInterval(() => this._checkServer(), 30000);
     this.render();
   }
 
@@ -24,11 +30,24 @@ class PsNavBar extends HTMLElement {
     this._unsubs.forEach((u) => u());
     window.removeEventListener("online", this._onOnline);
     window.removeEventListener("offline", this._onOffline);
+    if (this._healthCheckInterval) clearInterval(this._healthCheckInterval);
   }
 
-  _updateOfflineIndicator(offline) {
-    const el = this.shadowRoot.querySelector(".offline-indicator");
-    if (el) el.style.display = offline ? "flex" : "none";
+  async _checkServer() {
+    if (!navigator.onLine) { this._setOffline(true); return; }
+    try {
+      const res = await fetch("/api/health", { method: "HEAD", cache: "no-store" });
+      this._setOffline(!res.ok);
+    } catch {
+      this._setOffline(true);
+    }
+  }
+
+  _setOffline(offline) {
+    if (this._offline === offline) return;
+    this._offline = offline;
+    const banner = this.shadowRoot.querySelector(".offline-banner");
+    if (banner) banner.style.display = offline ? "flex" : "none";
   }
 
   _getTabs() {
@@ -124,22 +143,39 @@ class PsNavBar extends HTMLElement {
           padding: 0 4px;
         }
 
-        .offline-indicator {
+        .offline-banner {
           display: none;
           align-items: center;
-          gap: 5px;
-          padding: 4px 10px;
-          font-size: 0.7rem;
-          color: #f1fa8c;
-          white-space: nowrap;
+          justify-content: center;
+          gap: 8px;
+          padding: 8px 14px;
+          margin-bottom: 6px;
+          border-radius: 12px;
+          background: rgba(241, 196, 15, 0.12);
+          border: 1px solid rgba(241, 196, 15, 0.3);
+          color: #f1c40f;
+          font-size: 0.8rem;
+          animation: offline-pulse 2s ease-in-out infinite;
         }
 
-        .offline-dot {
-          width: 6px;
-          height: 6px;
-          border-radius: 50%;
-          background: #f1fa8c;
+        .offline-banner .offline-icon {
+          font-size: 1rem;
           flex-shrink: 0;
+        }
+
+        .offline-banner .offline-text {
+          font-weight: 500;
+        }
+
+        .offline-banner .offline-sub {
+          font-size: 0.7rem;
+          opacity: 0.75;
+          font-weight: 400;
+        }
+
+        @keyframes offline-pulse {
+          0%, 100% { border-color: rgba(241, 196, 15, 0.3); }
+          50% { border-color: rgba(241, 196, 15, 0.6); }
         }
 
         @media (max-width: 520px) {
@@ -152,9 +188,16 @@ class PsNavBar extends HTMLElement {
           }
           .tab-icon { font-size: 1rem; }
           .tab-label { font-size: 0.62rem; }
-          .offline-indicator { font-size: 0.62rem; padding: 4px 6px; }
+          .offline-banner { font-size: 0.72rem; padding: 6px 10px; }
         }
       </style>
+      <div class="offline-banner" style="display:${this._offline ? "flex" : "none"}">
+        <span class="offline-icon">⚡</span>
+        <span>
+          <span class="offline-text">Offline</span>
+          <span class="offline-sub"> — changes saved locally, will sync when reconnected</span>
+        </span>
+      </div>
       <nav>
         ${tabs
           .map(
@@ -167,10 +210,6 @@ class PsNavBar extends HTMLElement {
         `
           )
           .join("")}
-        <div class="offline-indicator" style="display:${navigator.onLine ? "none" : "flex"}">
-          <span class="offline-dot"></span>
-          Offline
-        </div>
       </nav>
     `;
 
