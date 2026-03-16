@@ -75,7 +75,7 @@ function initDb() {
   db = new Database(DB_PATH);
   db.loadExtension(CRSQLITE_EXT);
   db.pragma("journal_mode = WAL");
-  db.pragma("locking_mode = EXCLUSIVE"); // Required for NFS/EFS — avoids shared memory issues
+  if (BACKUP_BUCKET) db.pragma("locking_mode = EXCLUSIVE"); // Required for NFS/EFS — avoids shared memory issues
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS stores (
