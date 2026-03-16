@@ -11,6 +11,9 @@ RUN npm ci --production && apk del python3 make g++ unzip
 COPY server.js ./
 COPY static/ ./static/
 
+# Stamp build time into footer
+RUN sed -i "s/__BUILD_TIME__/$(date -u '+%Y-%m-%d %H:%M UTC')/" static/index.html
+
 # Data directory for SQLite DB and other persistent files (mount EFS here)
 RUN mkdir -p /data
 VOLUME /data
