@@ -48,6 +48,8 @@ class PsNavBar extends HTMLElement {
     this._offline = offline;
     const banner = this.shadowRoot.querySelector(".offline-banner");
     if (banner) banner.style.display = offline ? "flex" : "none";
+    // Trigger auto-sync when transitioning back to online
+    if (!offline) eventBus.emit("server:reachable");
   }
 
   _getTabs() {
@@ -149,10 +151,17 @@ class PsNavBar extends HTMLElement {
           justify-content: center;
           gap: 8px;
           padding: 8px 14px;
-          margin-bottom: 6px;
-          border-radius: 12px;
-          background: rgba(241, 196, 15, 0.12);
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          z-index: 10000;
+          border-radius: 0 0 12px 12px;
+          background: rgba(241, 196, 15, 0.15);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
           border: 1px solid rgba(241, 196, 15, 0.3);
+          border-top: none;
           color: #f1c40f;
           font-size: 0.8rem;
           animation: offline-pulse 2s ease-in-out infinite;

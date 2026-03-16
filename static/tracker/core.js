@@ -1293,6 +1293,38 @@ async function initStores() {
   }
 }
 
+// --- Balance recalculation ---------------------------------------------------
+// Derives correct balances from completions + redemptions history.
+// Called after merging stores from multiple devices so that balances
+// reflect ALL completions, not just the last-written value.
+
+function recalculateBalances() {
+  const users = usersStore.data;
+  for (const u of users) u.balances = {};
+  // Credit approved completion rewards
+  for (const c of completionStore.data) {
+    if (c.status !== "approved" || !c.rewards) continue;
+    const user = users.find((u) => u.id === c.userId);
+    if (!user) continue;
+    for (const [currId, amount] of Object.entries(c.rewards)) {
+      user.balances[currId] = (user.balances[currId] || 0) + amount;
+    }
+  }
+  // Deduct redemption costs
+  for (const r of redemptionStore.data) {
+    const item = shopStore.data.find((s) => s.id === r.shopItemId);
+    if (!item || !item.costs) continue;
+    const user = users.find((u) => u.id === r.userId);
+    if (!user) continue;
+    for (const [currId, cost] of Object.entries(item.costs)) {
+      user.balances[currId] = (user.balances[currId] || 0) - cost;
+    }
+  }
+  usersStore.save();
+  bus.emit("balances:changed");
+  console.log("ParentSlop: balances recalculated from history");
+}
+
 // --- Auto-sync on reconnect --------------------------------------------------
 
 let _syncPending = false;
@@ -1305,6 +1337,7 @@ bus.on("server:reachable", () => {
   console.log(`ParentSlop: connection restored, syncing ${dirty.length} dirty store(s)...`);
   Promise.all(dirty.map((s) => s.fetchFromServer())).then(() => {
     _syncPending = false;
+    recalculateBalances();
     bus.emit("stores:synced");
     console.log("ParentSlop: offline changes synced");
   }).catch(() => { _syncPending = false; });
