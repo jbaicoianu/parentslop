@@ -978,14 +978,18 @@
         } catch (err) {
           console.warn("Boot: failed to reach server, falling back to localStorage", err);
           // Offline fallback: if we have a previous session in localStorage, show tracker
-          const app = trackerStore.app.data;
-          if (app.setupComplete && app.currentUserId) {
-            await tracker.initStores();
-            showTracker();
-            eventBus.emit("user:changed", { userId: app.currentUserId });
-          } else {
-            showAuth();
+          try {
+            const app = trackerStore.app.data;
+            if (app.setupComplete && app.currentUserId) {
+              await tracker.initStores();
+              showTracker();
+              eventBus.emit("user:changed", { userId: app.currentUserId });
+              return;
+            }
+          } catch (e2) {
+            console.warn("Boot: offline fallback failed", e2);
           }
+          showAuth();
         }
       }
 
