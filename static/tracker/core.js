@@ -42,6 +42,15 @@ class TrackerStore {
     this._localOnly = localOnly;
   }
 
+  _isDirty() {
+    return localStorage.getItem(`${this._key}.__dirty`) === "1";
+  }
+
+  _setDirty(dirty) {
+    if (dirty) localStorage.setItem(`${this._key}.__dirty`, "1");
+    else localStorage.removeItem(`${this._key}.__dirty`);
+  }
+
   load() {
     try {
       const raw = localStorage.getItem(this._key);
@@ -82,8 +91,23 @@ class TrackerStore {
         return false;
       }
       const row = await res.json();
-      this._data = JSON.parse(row.value);
-      localStorage.setItem(this._key, row.value);
+      const serverData = JSON.parse(row.value);
+
+      if (this._isDirty()) {
+        // Merge unsynced local changes with server data
+        this.load();
+        const merged = TrackerStore.mergeData(this._data, serverData);
+        this._data = merged;
+        localStorage.setItem(this._key, JSON.stringify(merged));
+        this._setDirty(false);
+        // Push merged result back to server
+        this._persistToServer();
+        console.log(`TrackerStore: merged offline changes for ${this._key}`);
+      } else {
+        this._data = serverData;
+        localStorage.setItem(this._key, row.value);
+      }
+      bus.emit(`store:${this._key}`, this._data);
       bus.emit("server:reachable");
       return true;
     } catch (e) {
@@ -103,12 +127,50 @@ class TrackerStore {
       });
       if (res.status === 401) {
         bus.emit("auth:required");
+        return;
       }
+      this._setDirty(false);
       bus.emit("server:reachable");
     } catch (e) {
       console.warn(`TrackerStore: server persist failed for ${this._key}`, e);
+      this._setDirty(true);
       bus.emit("server:unreachable");
     }
+  }
+
+  // Merge two datasets: union arrays by item ID, resolve conflicts
+  static mergeData(local, server) {
+    if (!Array.isArray(local) || !Array.isArray(server)) return local;
+    const merged = new Map();
+    for (const item of server) {
+      if (item && item.id) merged.set(item.id, item);
+    }
+    for (const item of local) {
+      if (!item || !item.id) continue;
+      const existing = merged.get(item.id);
+      if (!existing) {
+        merged.set(item.id, item);
+      } else {
+        merged.set(item.id, TrackerStore.resolveConflict(existing, item));
+      }
+    }
+    return Array.from(merged.values());
+  }
+
+  // Resolve conflict between server and local versions of the same item
+  static resolveConflict(serverItem, localItem) {
+    // For completions: prefer the more advanced status
+    if ("status" in serverItem && "status" in localItem) {
+      const rank = { pending: 0, approved: 1, rejected: 1 };
+      const sr = rank[serverItem.status] ?? 0;
+      const lr = rank[localItem.status] ?? 0;
+      if (sr > lr) return serverItem;
+      if (lr > sr) return localItem;
+    }
+    // Fallback: most recent timestamp wins
+    const sTime = serverItem.updatedAt || serverItem.completedAt || serverItem.createdAt || "";
+    const lTime = localItem.updatedAt || localItem.completedAt || localItem.createdAt || "";
+    return lTime >= sTime ? localItem : serverItem;
   }
 
   get data() {
@@ -1225,6 +1287,23 @@ async function initStores() {
     console.warn("ParentSlop: initStores failed, using localStorage", e);
   }
 }
+
+// --- Auto-sync on reconnect --------------------------------------------------
+
+let _syncPending = false;
+bus.on("server:reachable", () => {
+  if (_syncPending) return;
+  // Check if any stores have unsynced offline changes
+  const dirty = ALL_STORES.filter((s) => !s._localOnly && s._isDirty());
+  if (dirty.length === 0) return;
+  _syncPending = true;
+  console.log(`ParentSlop: connection restored, syncing ${dirty.length} dirty store(s)...`);
+  Promise.all(dirty.map((s) => s.fetchFromServer())).then(() => {
+    _syncPending = false;
+    bus.emit("stores:synced");
+    console.log("ParentSlop: offline changes synced");
+  }).catch(() => { _syncPending = false; });
+});
 
 // --- Expose globals ----------------------------------------------------------
 

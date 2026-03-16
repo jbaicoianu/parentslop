@@ -1045,6 +1045,12 @@
         showAuth();
       });
 
+      // ---- Offline sync completed — refresh UI ----
+      eventBus.on("stores:synced", () => {
+        const uid = trackerStore.app.data.currentUserId;
+        if (uid) eventBus.emit("user:changed", { userId: uid });
+      });
+
       // ---- View switching ----
       function switchView(view) {
         // Main views
