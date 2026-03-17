@@ -137,7 +137,7 @@ class PsAdminCurrencies extends HTMLElement {
       this.render();
     });
 
-    this.shadowRoot.getElementById("save-btn").addEventListener("click", () => {
+    this.shadowRoot.getElementById("save-btn").addEventListener("click", async () => {
       const s = this.shadowRoot;
       const name = s.getElementById("f-name").value.trim();
       if (!name) { s.getElementById("f-name").focus(); return; }
@@ -146,17 +146,9 @@ class PsAdminCurrencies extends HTMLElement {
       const color = s.getElementById("f-color").value;
 
       if (isNew) {
-        tracker.createCurrency(name, symbol, decimals, color);
+        await tracker.createCurrency(name, symbol, decimals, color);
       } else {
-        const c = trackerStore.currencies.data.find((x) => x.id === this._editing);
-        if (c) {
-          c.name = name;
-          c.symbol = symbol;
-          c.decimals = decimals;
-          c.color = color;
-          trackerStore.currencies.save();
-          eventBus.emit("currencies:changed");
-        }
+        await tracker.updateCurrency(this._editing, { name, symbol, decimals, color });
       }
       this._editing = null;
       this.render();

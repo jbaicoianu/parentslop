@@ -235,14 +235,14 @@ class PsRewardShop extends HTMLElement {
     `;
 
     this.shadowRoot.querySelectorAll(".buy-btn:not([disabled])").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const itemId = btn.dataset.itemId;
         const item = trackerStore.shop.data.find((s) => s.id === itemId);
         if (!item) return;
 
         if (!confirm(`Buy "${item.name}" for ${this._costText(item)}?`)) return;
 
-        const result = tracker.purchaseItem(itemId, user.id);
+        const result = await tracker.purchaseItem(itemId, user.id);
         if (result.ok) {
           eventBus.emit("toast:show", { message: `Purchased ${item.name}!`, type: "success" });
         } else {

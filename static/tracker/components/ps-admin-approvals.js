@@ -247,7 +247,7 @@ class PsAdminApprovals extends HTMLElement {
     `;
 
     this.shadowRoot.querySelectorAll("[data-approve]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const completionId = btn.dataset.approve;
         const criteriaSection = this.shadowRoot.querySelector(`[data-criteria-for="${completionId}"]`);
         const checkedIds = [];
@@ -256,19 +256,21 @@ class PsAdminApprovals extends HTMLElement {
             checkedIds.push(cb.dataset.criterionId);
           });
         }
-        tracker.approveCompletion(completionId, checkedIds);
+        await tracker.approveCompletion(completionId, checkedIds);
         if (typeof slopSFX !== "undefined") slopSFX.cashJingle();
         eventBus.emit("toast:show", { message: "Approved!", type: "success" });
+        this.render();
       });
     });
 
     this.shadowRoot.querySelectorAll("[data-reject]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const note = prompt("Rejection reason (optional):");
         if (note === null) return; // cancelled
-        tracker.rejectCompletion(btn.dataset.reject, note);
+        await tracker.rejectCompletion(btn.dataset.reject, note);
         if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
         eventBus.emit("toast:show", { message: "Rejected.", type: "danger" });
+        this.render();
       });
     });
 

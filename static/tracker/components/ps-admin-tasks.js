@@ -131,23 +131,23 @@ class PsAdminTasks extends HTMLElement {
     });
 
     this.shadowRoot.querySelectorAll("[data-activate]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        tracker.activateTransientTask(btn.dataset.activate);
+      btn.addEventListener("click", async () => {
+        await tracker.activateTransientTask(btn.dataset.activate);
         eventBus.emit("toast:show", { message: "Task activated!", type: "success" });
       });
     });
 
     this.shadowRoot.querySelectorAll("[data-deactivate]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        tracker.deactivateTransientTask(btn.dataset.deactivate);
+      btn.addEventListener("click", async () => {
+        await tracker.deactivateTransientTask(btn.dataset.deactivate);
         eventBus.emit("toast:show", { message: "Task deactivated.", type: "warning" });
       });
     });
 
     this.shadowRoot.querySelectorAll("[data-archive]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         if (confirm("Archive this task?")) {
-          tracker.archiveTask(btn.dataset.archive);
+          await tracker.archiveTask(btn.dataset.archive);
         }
       });
     });
@@ -182,10 +182,9 @@ class PsAdminTasks extends HTMLElement {
     if (idx < 0 || idx >= users.length) { alert("Invalid choice."); return; }
 
     const note = prompt("Optional note (leave blank for none):") || "";
-    tracker.logPenalty(taskId, users[idx].id, note);
+    tracker.logPenalty(taskId, users[idx].id, note).then(() => this.render());
     if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
     eventBus.emit("toast:show", { message: "Penalty applied.", type: "danger" });
-    this.render();
   }
 
   _renderForm() {
@@ -723,14 +722,12 @@ class PsAdminTasks extends HTMLElement {
       data.bonusCriteria = null;
     }
 
-    if (this._editing === "new") {
-      tracker.createTask(data);
-    } else {
-      tracker.updateTask(this._editing, data);
-    }
+    const p = this._editing === "new"
+      ? tracker.createTask(data)
+      : tracker.updateTask(this._editing, data);
+    p.then(() => this.render());
 
     this._editing = null;
-    this.render();
   }
 }
 

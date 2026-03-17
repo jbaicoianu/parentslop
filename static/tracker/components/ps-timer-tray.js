@@ -132,13 +132,13 @@ class PsTimerTray extends HTMLElement {
     this._render();
   }
 
-  _complete(key) {
+  async _complete(key) {
     const timer = this._timers.get(key);
     if (!timer) return;
 
     // If paused, use the frozen elapsed; otherwise use live
     const elapsed = Math.round(timer.paused ? timer.pausedElapsed : timer.elapsed);
-    const result = tracker.completeTask(timer.taskId, timer.userId, elapsed);
+    const result = await tracker.completeTask(timer.taskId, timer.userId, elapsed);
 
     if (result) {
       const bonusApplied = result.timerMultiplier > 1;

@@ -9,7 +9,7 @@ class PsAdminUsers extends HTMLElement {
   connectedCallback() {
     this._unsubs.push(
       eventBus.on("balances:changed", () => this.render()),
-      eventBus.on("store:parentslop.users.v1", () => this.render()),
+      eventBus.on("user:changed", () => this.render()),
     );
     this.render();
   }
@@ -189,33 +189,17 @@ class PsAdminUsers extends HTMLElement {
         const data = await res.json();
         const memberId = data.id || tracker.uid();
 
-        // Add to usersStore
-        const users = trackerStore.users.data;
-        users.push({
+        // Add to users table via API
+        await tracker.createUser({
           id: memberId,
           name: name.trim(),
-          isAdmin: false,
           role: "kid",
-          balances: {},
           tags: [],
-          createdAt: tracker.now(),
         });
-        trackerStore.users.save();
         this.render();
       } catch (e) {
-        // Fallback: add to store only
-        const users = trackerStore.users.data;
-        users.push({
-          id: tracker.uid(),
-          name: name.trim(),
-          isAdmin: false,
-          role: "kid",
-          balances: {},
-          tags: [],
-          createdAt: tracker.now(),
-        });
-        trackerStore.users.save();
-        this.render();
+        console.error("Failed to add user:", e);
+        alert("Failed to add user. Please try again.");
       }
     });
 
@@ -233,15 +217,13 @@ class PsAdminUsers extends HTMLElement {
             return;
           }
         }
-        u.role = newRole;
-        u.isAdmin = (newRole === "parent");
-        trackerStore.users.save();
+        await tracker.updateUser(u.id, { role: newRole });
         // Sync isAdmin to server auth system
         try {
           await fetch(`/api/auth/member/${encodeURIComponent(u.id)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ isAdmin: u.isAdmin }),
+            body: JSON.stringify({ isAdmin: newRole === "parent" }),
           });
         } catch (e) { /* best-effort */ }
         this.render();
@@ -249,7 +231,7 @@ class PsAdminUsers extends HTMLElement {
     });
 
     this.shadowRoot.querySelectorAll("[data-adjust]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const userId = btn.dataset.adjust;
         const currencies = trackerStore.currencies.data;
         if (currencies.length === 0) { alert("No currencies set up."); return; }
@@ -267,18 +249,18 @@ class PsAdminUsers extends HTMLElement {
         const amount = parseFloat(amountStr);
         if (isNaN(amount)) { alert("Invalid number."); return; }
 
-        tracker.adjustBalance(userId, curr.id, amount);
+        await tracker.adjustBalance(userId, curr.id, amount);
         eventBus.emit("toast:show", { message: `Adjusted ${curr.name} by ${amount}`, type: "success" });
         this.render();
       });
     });
 
     this.shadowRoot.querySelectorAll("[data-reset-daily]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const u = trackerStore.users.data.find((x) => x.id === btn.dataset.resetDaily);
         if (!u) return;
         if (!confirm(`Reset all of ${u.name}'s daily tasks for today? This will undo completions and reverse any earned rewards.`)) return;
-        const count = tracker.resetDailyTasks(u.id);
+        const count = await tracker.resetDailyTasks(u.id);
         eventBus.emit("toast:show", {
           message: count > 0 ? `Reset ${count} completion${count !== 1 ? "s" : ""} for ${u.name}.` : `No daily completions to reset for ${u.name} today.`,
           type: count > 0 ? "success" : "warning",
@@ -288,34 +270,27 @@ class PsAdminUsers extends HTMLElement {
     });
 
     this.shadowRoot.querySelectorAll("[data-rename]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const u = trackerStore.users.data.find((x) => x.id === btn.dataset.rename);
         if (!u) return;
         const name = prompt("New name:", u.name);
         if (!name?.trim()) return;
-        u.name = name.trim();
-        trackerStore.users.save();
-        eventBus.emit("balances:changed", { userId: u.id }); // triggers re-render elsewhere
+        await tracker.updateUser(u.id, { name: name.trim() });
         this.render();
       });
     });
 
     this.shadowRoot.querySelectorAll("[data-delete]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         if (!confirm("Delete this user? This cannot be undone.")) return;
-        const users = trackerStore.users.data;
-        const idx = users.findIndex((u) => u.id === btn.dataset.delete);
-        if (idx >= 0) {
-          users.splice(idx, 1);
-          trackerStore.users.save();
-          this.render();
-        }
+        await tracker.deleteUser(btn.dataset.delete);
+        this.render();
       });
     });
 
     // Tag management
     this.shadowRoot.querySelectorAll("[data-add-tag]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const userId = btn.dataset.addTag;
         const u = trackerStore.users.data.find((x) => x.id === userId);
         if (!u) return;
@@ -326,24 +301,22 @@ class PsAdminUsers extends HTMLElement {
         if (unusedTags.length > 0) hint += `\n\nExisting tags: ${unusedTags.join(", ")}`;
         const tag = prompt(hint);
         if (!tag?.trim()) return;
-        if (!u.tags) u.tags = [];
+        const currentTags = u.tags || [];
         const trimmed = tag.trim().toLowerCase();
-        if (!u.tags.includes(trimmed)) {
-          u.tags.push(trimmed);
-          trackerStore.users.save();
+        if (!currentTags.includes(trimmed)) {
+          await tracker.updateUser(userId, { tags: [...currentTags, trimmed] });
           this.render();
         }
       });
     });
 
     this.shadowRoot.querySelectorAll("[data-tag-user]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const userId = btn.dataset.tagUser;
         const tag = btn.dataset.tag;
         const u = trackerStore.users.data.find((x) => x.id === userId);
         if (!u || !u.tags) return;
-        u.tags = u.tags.filter((t) => t !== tag);
-        trackerStore.users.save();
+        await tracker.updateUser(userId, { tags: u.tags.filter((t) => t !== tag) });
         this.render();
       });
     });

@@ -173,14 +173,14 @@ class PsTaskList extends HTMLElement {
     `;
 
     this.shadowRoot.querySelectorAll(".complete-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const taskId = btn.dataset.taskId;
         const task = trackerStore.tasks.data.find((t) => t.id === taskId);
 
         if (task && task.timerBonus) {
           eventBus.emit("timer:start", { taskId, userId: user.id });
         } else {
-          const result = tracker.completeTask(taskId, user.id);
+          const result = await tracker.completeTask(taskId, user.id);
           if (result && result.status === "pending") {
             eventBus.emit("toast:show", { message: "Submitted for approval!", type: "warning" });
           } else if (result) {

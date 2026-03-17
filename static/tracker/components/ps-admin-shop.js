@@ -85,9 +85,9 @@ class PsAdminShop extends HTMLElement {
     });
 
     this.shadowRoot.querySelectorAll("[data-archive]").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         if (confirm("Remove this shop item?")) {
-          tracker.updateShopItem(btn.dataset.archive, { archived: true });
+          await tracker.updateShopItem(btn.dataset.archive, { archived: true });
         }
       });
     });
@@ -170,7 +170,7 @@ class PsAdminShop extends HTMLElement {
       this.render();
     });
 
-    this.shadowRoot.getElementById("save-btn").addEventListener("click", () => {
+    this.shadowRoot.getElementById("save-btn").addEventListener("click", async () => {
       const s = this.shadowRoot;
       const name = s.getElementById("f-name").value.trim();
       if (!name) { s.getElementById("f-name").focus(); return; }
@@ -183,9 +183,9 @@ class PsAdminShop extends HTMLElement {
       });
 
       if (this._editing === "new") {
-        tracker.createShopItem({ name, description, costs });
+        await tracker.createShopItem({ name, description, costs });
       } else {
-        tracker.updateShopItem(this._editing, { name, description, costs });
+        await tracker.updateShopItem(this._editing, { name, description, costs });
       }
 
       this._editing = null;

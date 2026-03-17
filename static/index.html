@@ -558,7 +558,7 @@
         this.render();
       }
 
-      handleAddUser() {
+      async handleAddUser() {
         const name = window.prompt("Enter a name for this child profile:", "");
         if (name === null) return;
         const trimmed = name.trim();
@@ -567,27 +567,19 @@
           return;
         }
         const users = [...this.users, createUser(trimmed)];
-        // Also add to tracker store
-        trackerStore.users.load();
-        trackerStore.users.data.push({
+        // Also add to tracker store via API
+        await tracker.createUser({
           id: users[users.length - 1].id,
           name: trimmed,
-          isAdmin: false,
           role: "kid",
-          balances: {},
-          createdAt: new Date().toISOString(),
+          tags: [],
         });
-        trackerStore.users.save();
         this.setUsers(trackerStore.users.data);
       }
 
-      handleDeleteUser(id) {
+      async handleDeleteUser(id) {
         if (!confirm("Remove this user profile? This can't be undone.")) return;
-        const users = this.users.filter((u) => u.id !== id);
-        // Also remove from tracker store
-        const idx = trackerStore.users.data.findIndex((u) => u.id === id);
-        if (idx >= 0) trackerStore.users.data.splice(idx, 1);
-        trackerStore.users.save();
+        await tracker.deleteUser(id);
         this.setUsers(trackerStore.users.data);
       }
 

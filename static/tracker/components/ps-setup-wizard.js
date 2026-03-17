@@ -71,9 +71,9 @@ class PsSetupWizard extends HTMLElement {
     nameInput.focus();
   }
 
-  _finishSetup(currName, currSymbol, currDecimals = 0) {
+  async _finishSetup(currName, currSymbol, currDecimals = 0) {
     // Create first currency
-    tracker.createCurrency(currName, currSymbol, currDecimals, "#66d9ef");
+    await tracker.createCurrency(currName, currSymbol, currDecimals, "#66d9ef");
 
     // Mark setup complete
     const app = trackerStore.app.data;

@@ -93,8 +93,8 @@ class PsDashboard extends HTMLElement {
     if (!user.isAdmin) {
       if (!user.lastPenaltySeenAt) {
         // First run after deploy: initialize silently so old penalties don't trigger
-        user.lastPenaltySeenAt = tracker.now();
-        trackerStore.users.save();
+        tracker.setUserPref(user.id, "lastPenaltySeenAt", tracker.now());
+        user.lastPenaltySeenAt = tracker.getUserPref(user.id, "lastPenaltySeenAt");
       } else {
         // Capture cutoff once per session so re-renders keep showing NEW badges
         if (!this._penaltyCutoffForSession) {
@@ -105,8 +105,8 @@ class PsDashboard extends HTMLElement {
           (c) => c.userId === user.id && c.isPenalty && c.completedAt > _penaltySeenCutoff
         ).length;
         if (unseenCount > 0) {
-          user.lastPenaltySeenAt = tracker.now();
-          trackerStore.users.save();
+          tracker.setUserPref(user.id, "lastPenaltySeenAt", tracker.now());
+          user.lastPenaltySeenAt = tracker.getUserPref(user.id, "lastPenaltySeenAt");
           // Staggered sad trombones — overlapping for crescendo
           for (let i = 0; i < unseenCount; i++) {
             setTimeout(() => {
@@ -121,8 +121,8 @@ class PsDashboard extends HTMLElement {
     let _earningsSeenCutoff = null;
     if (!user.isAdmin) {
       if (!user.lastEarningsSeenAt) {
-        user.lastEarningsSeenAt = tracker.now();
-        trackerStore.users.save();
+        tracker.setUserPref(user.id, "lastEarningsSeenAt", tracker.now());
+        user.lastEarningsSeenAt = tracker.getUserPref(user.id, "lastEarningsSeenAt");
       } else {
         // Capture cutoff once per session so re-renders keep showing NEW badges
         if (!this._earningsCutoffForSession) {
@@ -133,8 +133,8 @@ class PsDashboard extends HTMLElement {
           (c) => c.userId === user.id && !c.isPenalty && (c.status === "approved" || c.status === "rejected") && (c.rejectedAt || c.approvedAt || c.completedAt) > _earningsSeenCutoff
         ).length;
         if (unseenEarnings > 0) {
-          user.lastEarningsSeenAt = tracker.now();
-          trackerStore.users.save();
+          tracker.setUserPref(user.id, "lastEarningsSeenAt", tracker.now());
+          user.lastEarningsSeenAt = tracker.getUserPref(user.id, "lastEarningsSeenAt");
         }
       }
     }
@@ -1612,8 +1612,8 @@ class PsDashboard extends HTMLElement {
           card.classList.add("job-completing");
         }
         if (typeof slopSFX !== "undefined") slopSFX.grab();
-        setTimeout(() => {
-          tracker.acceptJob(taskId, user.id);
+        setTimeout(async () => {
+          await tracker.acceptJob(taskId, user.id);
           eventBus.emit("toast:show", { message: "Job accepted!", type: "success" });
           this.render();
         }, 400);
@@ -1630,8 +1630,8 @@ class PsDashboard extends HTMLElement {
 
         if (typeof slopSFX !== "undefined") slopSFX.coin();
 
-        setTimeout(() => {
-          const result = tracker.submitFixedJob(taskId, user.id);
+        setTimeout(async () => {
+          const result = await tracker.submitFixedJob(taskId, user.id);
           if (result && result.status === "pending") {
             if (typeof slopSFX !== "undefined") slopSFX.submitted();
             eventBus.emit("toast:show", { message: "Submitted for approval!", type: "warning" });
@@ -1649,18 +1649,18 @@ class PsDashboard extends HTMLElement {
 
     // --- Bind Clock In buttons ---
     this.shadowRoot.querySelectorAll(".clockin-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
+      btn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        tracker.clockIn(btn.dataset.taskId, user.id);
+        await tracker.clockIn(btn.dataset.taskId, user.id);
         this.render();
       });
     });
 
     // --- Bind Clock Out buttons ---
     this.shadowRoot.querySelectorAll(".clockout-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
+      btn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        tracker.clockOut(btn.dataset.taskId, user.id);
+        await tracker.clockOut(btn.dataset.taskId, user.id);
         this.render();
       });
     });
@@ -1675,8 +1675,8 @@ class PsDashboard extends HTMLElement {
 
         if (typeof slopSFX !== "undefined") slopSFX.levelUp();
 
-        setTimeout(() => {
-          tracker.submitHourlyWork(taskId, user.id);
+        setTimeout(async () => {
+          await tracker.submitHourlyWork(taskId, user.id);
           if (typeof slopSFX !== "undefined") slopSFX.submitted();
           eventBus.emit("toast:show", { message: "Work submitted for approval!", type: "warning" });
           this.render();
@@ -1760,14 +1760,15 @@ class PsDashboard extends HTMLElement {
           const penaltyId = btn.dataset.penaltyId;
           const noteInput = root.querySelector(`.penalty-note-input[data-kid-id="${kidId}"]`);
           const note = noteInput?.value || "";
-          tracker.logPenalty(penaltyId, kidId, note);
-          if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
           const kid = trackerStore.users.data.find((u) => u.id === kidId);
           const task = trackerStore.tasks.data.find((t) => t.id === penaltyId);
+          tracker.logPenalty(penaltyId, kidId, note).then(() => {
+            this.render();
+          });
+          if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
           eventBus.emit("toast:show", { message: `Penalty: ${task?.name || "Unknown"} → ${kid?.name || "Unknown"}`, type: "danger" });
           this._openMenuId = null;
           this._penaltyPickerOpen = false;
-          this.render();
         });
       });
 
@@ -1779,13 +1780,14 @@ class PsDashboard extends HTMLElement {
           const kid = trackerStore.users.data.find((u) => u.id === kidId);
           if (!kid) return;
           if (!confirm(`Reset all of ${kid.name}'s daily tasks for today? This will undo completions and reverse any earned rewards.`)) return;
-          const count = tracker.resetDailyTasks(kidId);
-          eventBus.emit("toast:show", {
-            message: count > 0 ? `Reset ${count} completion${count !== 1 ? "s" : ""} for ${kid.name}.` : `No daily completions to reset for ${kid.name} today.`,
-            type: count > 0 ? "success" : "warning",
+          tracker.resetDailyTasks(kidId).then((count) => {
+            eventBus.emit("toast:show", {
+              message: count > 0 ? `Reset ${count} completion${count !== 1 ? "s" : ""} for ${kid.name}.` : `No daily completions to reset for ${kid.name} today.`,
+              type: count > 0 ? "success" : "warning",
+            });
+            this.render();
           });
           this._openMenuId = null;
-          this.render();
         });
       });
 
@@ -1810,10 +1812,11 @@ class PsDashboard extends HTMLElement {
           const amount = parseFloat(amountStr);
           if (isNaN(amount)) { alert("Invalid number."); return; }
 
-          tracker.adjustBalance(kidId, curr.id, amount);
+          tracker.adjustBalance(kidId, curr.id, amount).then(() => {
+            this.render();
+          });
           eventBus.emit("toast:show", { message: `Adjusted ${curr.name} by ${amount}`, type: "success" });
           this._openMenuId = null;
-          this.render();
         });
       });
 
@@ -1840,11 +1843,12 @@ class PsDashboard extends HTMLElement {
               checkedIds.push(cb.dataset.criterionId);
             });
           }
-          tracker.approveCompletion(completionId, checkedIds);
+          tracker.approveCompletion(completionId, checkedIds).then(() => {
+            this.render();
+          });
           if (typeof slopSFX !== "undefined") slopSFX.cashJingle();
           eventBus.emit("toast:show", { message: "Approved!", type: "success" });
           this._expandedApprovalId = null;
-          this.render();
         });
       });
 
@@ -1854,11 +1858,12 @@ class PsDashboard extends HTMLElement {
           e.stopPropagation();
           const note = prompt("Rejection reason (optional):");
           if (note === null) return;
-          tracker.rejectCompletion(btn.dataset.kidReject, note);
+          tracker.rejectCompletion(btn.dataset.kidReject, note).then(() => {
+            this.render();
+          });
           if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
           eventBus.emit("toast:show", { message: "Rejected.", type: "danger" });
           this._expandedApprovalId = null;
-          this.render();
         });
       });
 
@@ -1938,8 +1943,8 @@ class PsDashboard extends HTMLElement {
     }
 
     // Step 4: After animation, actually complete the task and rebuild
-    setTimeout(() => {
-      const result = tracker.completeTask(taskId, userId);
+    setTimeout(async () => {
+      const result = await tracker.completeTask(taskId, userId);
 
       if (result && result.status === "pending") {
         if (typeof slopSFX !== "undefined") slopSFX.submitted();
