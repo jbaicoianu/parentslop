@@ -1271,8 +1271,12 @@ const ALL_STORES = [usersStore, currencyStore, taskStore, completionStore, shopS
 
 async function initStores() {
   try {
+    const hadDirty = ALL_STORES.some((s) => !s._localOnly && s._isDirty());
     const onServer = await Promise.all(ALL_STORES.map((s) => s.fetchFromServer()));
     migrateUsers();
+
+    // If stores were merged from offline changes, recalculate balances
+    if (hadDirty) recalculateBalances();
 
     // If localStorage has real data but any store is missing from server, bulk sync all
     if (appStore.data.setupComplete && onServer.includes(false)) {
@@ -1328,18 +1332,22 @@ function recalculateBalances() {
 // --- Auto-sync on reconnect --------------------------------------------------
 
 let _syncPending = false;
+let _wasOffline = false;
+bus.on("server:unreachable", () => { _wasOffline = true; });
 bus.on("server:reachable", () => {
-  if (_syncPending) return;
-  // Check if any stores have unsynced offline changes
-  const dirty = ALL_STORES.filter((s) => !s._localOnly && s._isDirty());
-  if (dirty.length === 0) return;
+  if (!_wasOffline || _syncPending) return;
+  _wasOffline = false;
   _syncPending = true;
-  console.log(`ParentSlop: connection restored, syncing ${dirty.length} dirty store(s)...`);
-  Promise.all(dirty.map((s) => s.fetchFromServer())).then(() => {
+  // Fetch ALL stores on reconnect — not just dirty ones — so we pick up
+  // changes made on other devices while we were offline (e.g. approvals).
+  const syncable = ALL_STORES.filter((s) => !s._localOnly);
+  const hasDirty = syncable.some((s) => s._isDirty());
+  console.log(`ParentSlop: connection restored, syncing all stores${hasDirty ? " (has offline changes)" : ""}...`);
+  Promise.all(syncable.map((s) => s.fetchFromServer())).then(() => {
     _syncPending = false;
-    recalculateBalances();
+    if (hasDirty) recalculateBalances();
     bus.emit("stores:synced");
-    console.log("ParentSlop: offline changes synced");
+    console.log("ParentSlop: sync complete");
   }).catch(() => { _syncPending = false; });
 });
 
