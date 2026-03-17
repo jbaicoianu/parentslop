@@ -212,6 +212,12 @@ async function updateCurrency(currencyId, updates) {
   return c;
 }
 
+async function deleteCurrency(currencyId) {
+  await apiFetch(`/api/currencies/${currencyId}`, { method: "DELETE" });
+  _state.currencies = _state.currencies.filter((x) => x.id !== currencyId);
+  bus.emit("currencies:changed");
+}
+
 // --- Balance management ------------------------------------------------------
 
 function getBalance(userId, currencyId) {
@@ -1335,6 +1341,7 @@ window.tracker = {
   formatAmount,
   createCurrency,
   updateCurrency,
+  deleteCurrency,
   getBalance,
   adjustBalance,
   setBalance,

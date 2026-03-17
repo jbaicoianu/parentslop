@@ -68,6 +68,7 @@ class PsAdminCurrencies extends HTMLElement {
               <div class="curr-meta">${c.decimals} decimal place${c.decimals !== 1 ? "s" : ""} · ${c.color}</div>
             </div>
             <button class="btn btn-sm btn-ghost" data-edit="${c.id}">Edit</button>
+            <button class="btn btn-sm btn-ghost" data-delete="${c.id}" style="color:var(--danger)">Delete</button>
           </div>
         `).join("")}
 
@@ -86,6 +87,16 @@ class PsAdminCurrencies extends HTMLElement {
 
     this.shadowRoot.querySelectorAll("[data-edit]").forEach((btn) => {
       btn.addEventListener("click", () => { this._editing = btn.dataset.edit; this.render(); });
+    });
+
+    this.shadowRoot.querySelectorAll("[data-delete]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const c = trackerStore.currencies.data.find((x) => x.id === btn.dataset.delete);
+        if (!c) return;
+        if (!confirm(`Delete currency "${c.name}"? Any tasks or shop items using it will lose their price/reward for this currency.`)) return;
+        await tracker.deleteCurrency(btn.dataset.delete);
+        this.render();
+      });
     });
   }
 
