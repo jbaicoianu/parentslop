@@ -338,11 +338,14 @@ async function completeTask(taskId, userId, timerSeconds = null) {
     method: "POST",
     body: JSON.stringify({ taskId, userId, timerSeconds }),
   });
-  _state.completions.push(result);
-  if (result.status === "approved") {
-    _updateBalancesFromRewards(userId, result.rewards);
+  // SSE will handle state update; only apply if SSE hasn't already
+  if (!_state.completions.find((c) => c.id === result.id)) {
+    _state.completions.push(result);
+    if (result.status === "approved") {
+      _updateBalancesFromRewards(userId, result.rewards);
+    }
+    bus.emit("completion:added", result);
   }
-  bus.emit("completion:added", result);
   return result;
 }
 
@@ -388,9 +391,12 @@ async function logPenalty(taskId, userId, note = "") {
     method: "POST",
     body: JSON.stringify({ taskId, userId, note }),
   });
-  _state.completions.push(result);
-  _updateBalancesFromRewards(userId, result.rewards);
-  bus.emit("completion:added", result);
+  // SSE will handle state update; only apply if SSE hasn't already
+  if (!_state.completions.find((c) => c.id === result.id)) {
+    _state.completions.push(result);
+    _updateBalancesFromRewards(userId, result.rewards);
+    bus.emit("completion:added", result);
+  }
   return result;
 }
 
@@ -402,19 +408,22 @@ async function purchaseItem(shopItemId, userId) {
       method: "POST",
       body: JSON.stringify({ shopItemId, userId }),
     });
-    _state.redemptions.push(result.redemption);
-    // Deduct from cached balances
-    const item = _state.shopItems.find((s) => s.id === shopItemId);
-    if (item && item.costs) {
-      if (!_state.balances[userId]) _state.balances[userId] = {};
-      for (const [currId, cost] of Object.entries(item.costs)) {
-        _state.balances[userId][currId] = (getBalance(userId, currId) || 0) - cost;
+    // SSE will handle state update; only apply if SSE hasn't already
+    if (!_state.redemptions.find((r) => r.id === result.redemption.id)) {
+      _state.redemptions.push(result.redemption);
+      // Deduct from cached balances
+      const item = _state.shopItems.find((s) => s.id === shopItemId);
+      if (item && item.costs) {
+        if (!_state.balances[userId]) _state.balances[userId] = {};
+        for (const [currId, cost] of Object.entries(item.costs)) {
+          _state.balances[userId][currId] = (getBalance(userId, currId) || 0) - cost;
+        }
+        const user = _state.users.find((u) => u.id === userId);
+        if (user) user.balances = { ..._state.balances[userId] };
       }
-      const user = _state.users.find((u) => u.id === userId);
-      if (user) user.balances = { ..._state.balances[userId] };
+      bus.emit("redemption:added", result.redemption);
+      bus.emit("balances:changed", { userId });
     }
-    bus.emit("redemption:added", result.redemption);
-    bus.emit("balances:changed", { userId });
     return { ok: true, redemption: result.redemption };
   } catch (e) {
     return { ok: false, reason: e.message };
@@ -731,13 +740,16 @@ async function submitHourlyWork(taskId, userId) {
     method: "POST",
     body: JSON.stringify({ taskId, userId }),
   });
-  _state.completions.push(result);
+  // SSE will handle state update; only apply if SSE hasn't already
+  if (!_state.completions.find((c) => c.id === result.id)) {
+    _state.completions.push(result);
+    bus.emit("completion:added", result);
+  }
   // Update job claim in cache
   const claim = _state.jobClaims.find((c) => c.taskId === taskId && c.userId === userId);
   if (claim) claim.status = "submitted";
   // Remove worklog entries from cache
   _state.worklog = _state.worklog.filter((e) => !(e.taskId === taskId && e.userId === userId));
-  bus.emit("completion:added", result);
   bus.emit("jobclaims:changed");
   return result;
 }
