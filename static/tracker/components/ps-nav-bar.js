@@ -5,7 +5,7 @@ class PsNavBar extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._unsubs = [];
     this._offline = false;
-    this._healthCheckInterval = null;
+    this._queueCount = 0;
   }
 
   connectedCallback() {
@@ -14,42 +14,36 @@ class PsNavBar extends HTMLElement {
       eventBus.on("nav:changed", () => this.render()),
       eventBus.on("completion:added", () => this.render()),
       eventBus.on("completion:approved", () => this.render()),
-      eventBus.on("server:unreachable", () => this._setOffline(true)),
-      eventBus.on("server:reachable", () => this._setOffline(false)),
+      eventBus.on("server:unreachable", () => { this._offline = true; this._updateQueueCount(); }),
+      eventBus.on("server:reachable", () => { this._offline = false; this._updateBanner(); }),
+      eventBus.on("offlineQueue:changed", () => this._updateQueueCount()),
     );
-    this._onOnline = () => this._checkServer();
-    this._onOffline = () => this._setOffline(true);
-    window.addEventListener("online", this._onOnline);
-    window.addEventListener("offline", this._onOffline);
     if (!navigator.onLine) this._offline = true;
-    this._healthCheckInterval = setInterval(() => this._checkServer(), 30000);
     this.render();
   }
 
   disconnectedCallback() {
     this._unsubs.forEach((u) => u());
-    window.removeEventListener("online", this._onOnline);
-    window.removeEventListener("offline", this._onOffline);
-    if (this._healthCheckInterval) clearInterval(this._healthCheckInterval);
   }
 
-  async _checkServer() {
-    if (!navigator.onLine) { this._setOffline(true); return; }
-    try {
-      const res = await fetch("/api/health", { method: "HEAD", cache: "no-store" });
-      this._setOffline(!res.ok);
-    } catch {
-      this._setOffline(true);
+  _updateBanner() {
+    const banner = this.shadowRoot.querySelector(".offline-banner");
+    if (banner) banner.style.display = this._offline ? "flex" : "none";
+    const countEl = this.shadowRoot.querySelector(".queue-count");
+    if (countEl) {
+      countEl.textContent = this._queueCount > 0
+        ? `${this._queueCount} change${this._queueCount !== 1 ? "s" : ""} queued, will sync when reconnected`
+        : "changes saved locally, will sync when reconnected";
     }
   }
 
-  _setOffline(offline) {
-    if (this._offline === offline) return;
-    this._offline = offline;
-    const banner = this.shadowRoot.querySelector(".offline-banner");
-    if (banner) banner.style.display = offline ? "flex" : "none";
-    // Trigger auto-sync when transitioning back to online
-    if (!offline) eventBus.emit("server:reachable");
+  async _updateQueueCount() {
+    if (typeof offlineDB !== "undefined") {
+      try {
+        this._queueCount = await offlineDB.getPendingCount();
+      } catch { this._queueCount = 0; }
+    }
+    this._updateBanner();
   }
 
   _getTabs() {
@@ -204,7 +198,7 @@ class PsNavBar extends HTMLElement {
         <span class="offline-icon">⚡</span>
         <span>
           <span class="offline-text">Offline</span>
-          <span class="offline-sub"> — changes saved locally, will sync when reconnected</span>
+          <span class="offline-sub"> — <span class="queue-count">${this._queueCount > 0 ? `${this._queueCount} change${this._queueCount !== 1 ? "s" : ""} queued, will sync when reconnected` : "changes saved locally, will sync when reconnected"}</span></span>
         </span>
       </div>
       <nav>

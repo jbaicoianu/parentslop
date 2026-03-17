@@ -260,11 +260,12 @@ class PsDashboard extends HTMLElement {
         const isNew = _earningsSeenCutoff && earningTs > _earningsSeenCutoff;
         const isPending = c.status === "pending";
         const isRejected = c.status === "rejected";
+        const isOffline = !!c._offline;
         const rewardText = Object.entries(c.rewards || {})
           .filter(([, amt]) => amt > 0)
           .map(([cid, amt]) => "+" + tracker.formatAmount(amt, cid))
           .join(", ");
-        return { ...c, taskName: task?.name || "Unknown", isNew, isPending, isRejected, rewardText, earningTs };
+        return { ...c, taskName: task?.name || "Unknown", isNew, isPending, isRejected, isOffline, rewardText, earningTs };
       });
 
     // Streaks
@@ -1007,6 +1008,27 @@ class PsDashboard extends HTMLElement {
           50% { opacity: 1; }
         }
 
+        /* Offline/optimistic indicator */
+        .offline-indicator {
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          font-size: 0.62rem;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          color: #f1c40f;
+          background: rgba(241, 196, 15, 0.12);
+          padding: 2px 7px;
+          border-radius: 999px;
+          border: 1px solid rgba(241, 196, 15, 0.2);
+          animation: offlinePulse 2s ease-in-out infinite;
+        }
+        @keyframes offlinePulse {
+          0%, 100% { opacity: 0.7; }
+          50% { opacity: 1; }
+        }
+
         /* Celebration animation */
         .completing {
           animation: completeFlash 500ms ease-out forwards;
@@ -1462,9 +1484,10 @@ class PsDashboard extends HTMLElement {
                 <div class="earnings-title">Recent Earnings</div>
                 ${recentEarnings.map((e) => `
                   <div class="earnings-row${e.isNew ? " earnings-unseen" : ""}${e.isPending ? " earnings-pending" : ""}${e.isRejected ? " earnings-rejected" : ""}">
-                    ${e.isNew ? '<span class="earnings-new-badge">NEW</span>' : ""}
+                    ${e.isOffline ? '<span class="offline-indicator">⚡ syncing</span>' : ""}
+                    ${e.isNew && !e.isOffline ? '<span class="earnings-new-badge">NEW</span>' : ""}
                     ${e.isRejected ? '<span class="earnings-rejected-badge">rejected</span>' : ""}
-                    ${e.isPending ? '<span class="earnings-pending-badge">pending</span>' : ""}
+                    ${e.isPending && !e.isOffline ? '<span class="earnings-pending-badge">pending</span>' : ""}
                     <span class="earnings-name">${e.taskName}</span>
                     <span class="earnings-time">${timeAgo(e.earningTs)}</span>
                     <span class="earnings-amount">${e.isRejected ? "—" : e.rewardText}</span>

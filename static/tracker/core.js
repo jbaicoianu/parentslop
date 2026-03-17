@@ -167,6 +167,122 @@ async function apiFetch(url, options = {}) {
   }
 }
 
+// --- Offline detection -------------------------------------------------------
+
+function _isOfflineError(e) {
+  const msg = e?.message || "";
+  if (msg.includes("Failed to fetch") || msg.includes("NetworkError") ||
+      msg.includes("Network request failed") || msg.includes("Load failed")) return true;
+  // fetch() throws TypeError on network failure in most browsers
+  if (e.name === "TypeError" && !msg.includes("is not a function") &&
+      !msg.includes("Cannot read") && !msg.includes("undefined")) return true;
+  return false;
+}
+
+// --- Optimistic state builders -----------------------------------------------
+
+function _buildOptimisticCompletion(taskId, userId, timerSeconds, clientId) {
+  const task = _state.tasks.find((t) => t.id === taskId);
+  return {
+    id: clientId,
+    _clientId: clientId,
+    _offline: true,
+    taskId,
+    userId,
+    status: task?.requiresApproval ? "pending" : "approved",
+    rewards: task?.requiresApproval ? {} : (task?.rewards || {}),
+    completedAt: new Date().toISOString(),
+    timerSeconds,
+    streakCount: 0,
+    streakMultiplier: 1,
+    timerMultiplier: 1,
+    isPenalty: false,
+    isHourly: false,
+    note: "",
+  };
+}
+
+function _buildOptimisticRedemption(shopItemId, userId, clientId) {
+  const item = _state.shopItems.find((s) => s.id === shopItemId);
+  return {
+    id: clientId,
+    _clientId: clientId,
+    _offline: true,
+    shopItemId,
+    userId,
+    costs: item?.costs || {},
+    purchasedAt: new Date().toISOString(),
+    fulfilled: false,
+  };
+}
+
+function _buildOptimisticJobClaim(taskId, userId, clientId) {
+  return {
+    id: clientId,
+    _clientId: clientId,
+    _offline: true,
+    taskId,
+    userId,
+    status: "active",
+    acceptedAt: new Date().toISOString(),
+  };
+}
+
+function _buildOptimisticWorklogEntry(taskId, userId, clientId) {
+  return {
+    id: clientId,
+    _clientId: clientId,
+    _offline: true,
+    taskId,
+    userId,
+    clockIn: new Date().toISOString(),
+    clockOut: null,
+  };
+}
+
+function _buildOptimisticHourlyCompletion(taskId, userId, clientId) {
+  const task = _state.tasks.find((t) => t.id === taskId);
+  const totalSecs = getTotalSeconds(taskId, userId);
+  const totalHours = totalSecs / 3600;
+  const rewards = {};
+  if (task?.rewards) {
+    for (const [currId, rate] of Object.entries(task.rewards)) {
+      const c = getCurrency(currId);
+      const decimals = c ? (c.decimals || 0) : 0;
+      const factor = Math.pow(10, decimals);
+      let amount = Math.round(rate * totalHours * factor) / factor;
+      if (task.maxPayout && task.maxPayout[currId] != null) amount = Math.min(amount, task.maxPayout[currId]);
+      rewards[currId] = amount;
+    }
+  }
+  return {
+    id: clientId,
+    _clientId: clientId,
+    _offline: true,
+    taskId,
+    userId,
+    status: "pending",
+    rewards,
+    completedAt: new Date().toISOString(),
+    isPenalty: false,
+    isHourly: true,
+    totalSeconds: totalSecs,
+    streakCount: 0,
+    streakMultiplier: 1,
+    timerMultiplier: 1,
+    note: "",
+  };
+}
+
+// Register background sync when enqueueing offline writes
+function _registerBackgroundSync() {
+  if ("serviceWorker" in navigator && "SyncManager" in window) {
+    navigator.serviceWorker.ready
+      .then((reg) => reg.sync.register("replay-offline-queue"))
+      .catch(() => {}); // sync not supported — fine, we replay on reconnect
+  }
+}
+
 // --- ID helpers --------------------------------------------------------------
 
 function uid() {
@@ -334,19 +450,38 @@ function calcStreak(taskId, userId) {
 // --- Task completion logic ---------------------------------------------------
 
 async function completeTask(taskId, userId, timerSeconds = null) {
-  const result = await apiFetch("/api/completions", {
-    method: "POST",
-    body: JSON.stringify({ taskId, userId, timerSeconds }),
-  });
-  // SSE will handle state update; only apply if SSE hasn't already
-  if (!_state.completions.find((c) => c.id === result.id)) {
-    _state.completions.push(result);
-    if (result.status === "approved") {
-      _updateBalancesFromRewards(userId, result.rewards);
+  const clientId = uid();
+  const body = { taskId, userId, timerSeconds, _clientId: clientId };
+
+  try {
+    const result = await apiFetch("/api/completions", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    // SSE will handle state update; only apply if SSE hasn't already
+    if (!_state.completions.find((c) => c.id === result.id)) {
+      _state.completions.push(result);
+      if (result.status === "approved") {
+        _updateBalancesFromRewards(userId, result.rewards);
+      }
+      bus.emit("completion:added", result);
     }
-    bus.emit("completion:added", result);
+    return result;
+  } catch (e) {
+    if (!_isOfflineError(e)) throw e;
+    // Offline — queue and apply optimistic state
+    await offlineDB.enqueue({ clientId, endpoint: "/api/completions", method: "POST", body });
+    _registerBackgroundSync();
+    const optimistic = _buildOptimisticCompletion(taskId, userId, timerSeconds, clientId);
+    _state.completions.push(optimistic);
+    if (optimistic.status === "approved") {
+      _updateBalancesFromRewards(userId, optimistic.rewards);
+    }
+    bus.emit("completion:added", optimistic);
+    bus.emit("offlineQueue:changed");
+    _cacheState();
+    return optimistic;
   }
-  return result;
 }
 
 async function approveCompletion(completionId, checkedCriteria = []) {
@@ -403,10 +538,13 @@ async function logPenalty(taskId, userId, note = "") {
 // --- Shop / redemption -------------------------------------------------------
 
 async function purchaseItem(shopItemId, userId) {
+  const clientId = uid();
+  const body = { shopItemId, userId, _clientId: clientId };
+
   try {
     const result = await apiFetch("/api/redemptions", {
       method: "POST",
-      body: JSON.stringify({ shopItemId, userId }),
+      body: JSON.stringify(body),
     });
     // SSE will handle state update; only apply if SSE hasn't already
     if (!_state.redemptions.find((r) => r.id === result.redemption.id)) {
@@ -426,7 +564,27 @@ async function purchaseItem(shopItemId, userId) {
     }
     return { ok: true, redemption: result.redemption };
   } catch (e) {
-    return { ok: false, reason: e.message };
+    if (!_isOfflineError(e)) return { ok: false, reason: e.message };
+    // Offline — queue and apply optimistic state
+    await offlineDB.enqueue({ clientId, endpoint: "/api/redemptions", method: "POST", body });
+    _registerBackgroundSync();
+    const optimistic = _buildOptimisticRedemption(shopItemId, userId, clientId);
+    _state.redemptions.push(optimistic);
+    // Deduct from cached balances
+    const item = _state.shopItems.find((s) => s.id === shopItemId);
+    if (item && item.costs) {
+      if (!_state.balances[userId]) _state.balances[userId] = {};
+      for (const [currId, cost] of Object.entries(item.costs)) {
+        _state.balances[userId][currId] = (getBalance(userId, currId) || 0) - cost;
+      }
+      const user = _state.users.find((u) => u.id === userId);
+      if (user) user.balances = { ..._state.balances[userId] };
+    }
+    bus.emit("redemption:added", optimistic);
+    bus.emit("balances:changed", { userId });
+    bus.emit("offlineQueue:changed");
+    _cacheState();
+    return { ok: true, redemption: optimistic };
   }
 }
 
@@ -661,10 +819,13 @@ async function resetDailyTasks(userId) {
 // --- Job acceptance ----------------------------------------------------------
 
 async function acceptJob(taskId, userId) {
+  const clientId = uid();
+  const body = { taskId, userId, _clientId: clientId };
+
   try {
     const claim = await apiFetch("/api/job-claims", {
       method: "POST",
-      body: JSON.stringify({ taskId, userId }),
+      body: JSON.stringify(body),
     });
     // Update cache if not already there
     if (!_state.jobClaims.find((c) => c.id === claim.id)) {
@@ -672,8 +833,17 @@ async function acceptJob(taskId, userId) {
     }
     bus.emit("jobclaims:changed", claim);
     return claim;
-  } catch {
-    return null;
+  } catch (e) {
+    if (!_isOfflineError(e)) return null;
+    // Offline — queue and apply optimistic state
+    await offlineDB.enqueue({ clientId, endpoint: "/api/job-claims", method: "POST", body });
+    _registerBackgroundSync();
+    const optimistic = _buildOptimisticJobClaim(taskId, userId, clientId);
+    _state.jobClaims.push(optimistic);
+    bus.emit("jobclaims:changed", optimistic);
+    bus.emit("offlineQueue:changed");
+    _cacheState();
+    return optimistic;
   }
 }
 
@@ -688,28 +858,66 @@ function getJobClaim(taskId, userId) {
 // --- Clock in/out (hourly) ---------------------------------------------------
 
 async function clockIn(taskId, userId) {
-  const entry = await apiFetch("/api/worklog", {
-    method: "POST",
-    body: JSON.stringify({ taskId, userId }),
-  });
-  if (!_state.worklog.find((e) => e.id === entry.id)) {
-    _state.worklog.push(entry);
+  const clientId = uid();
+  const body = { taskId, userId, _clientId: clientId };
+
+  try {
+    const entry = await apiFetch("/api/worklog", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (!_state.worklog.find((e) => e.id === entry.id)) {
+      _state.worklog.push(entry);
+    }
+    bus.emit("worklog:changed", entry);
+    return entry;
+  } catch (e) {
+    if (!_isOfflineError(e)) throw e;
+    // Offline — queue and apply optimistic state
+    await offlineDB.enqueue({ clientId, endpoint: "/api/worklog", method: "POST", body });
+    _registerBackgroundSync();
+    const optimistic = _buildOptimisticWorklogEntry(taskId, userId, clientId);
+    _state.worklog.push(optimistic);
+    bus.emit("worklog:changed", optimistic);
+    bus.emit("offlineQueue:changed");
+    _cacheState();
+    return optimistic;
   }
-  bus.emit("worklog:changed", entry);
-  return entry;
 }
 
 async function clockOut(taskId, userId) {
   const open = _state.worklog.find((e) => e.taskId === taskId && e.userId === userId && e.clockOut === null);
   if (!open) return null;
 
-  const entry = await apiFetch(`/api/worklog/${open.id}/clock-out`, {
-    method: "PATCH",
-  });
-  const idx = _state.worklog.findIndex((e) => e.id === open.id);
-  if (idx >= 0) _state.worklog[idx] = entry;
-  bus.emit("worklog:changed", entry);
-  return entry;
+  try {
+    const entry = await apiFetch(`/api/worklog/${open.id}/clock-out`, {
+      method: "PATCH",
+    });
+    const idx = _state.worklog.findIndex((e) => e.id === open.id);
+    if (idx >= 0) _state.worklog[idx] = entry;
+    bus.emit("worklog:changed", entry);
+    return entry;
+  } catch (e) {
+    if (!_isOfflineError(e)) throw e;
+    // Offline — queue and apply optimistic clock-out
+    const clientId = uid();
+    await offlineDB.enqueue({
+      clientId,
+      endpoint: `/api/worklog/${open.id}/clock-out`,
+      method: "PATCH",
+      body: { _clientId: clientId },
+    });
+    _registerBackgroundSync();
+    const clockOutTime = new Date().toISOString();
+    const idx = _state.worklog.findIndex((e) => e.id === open.id);
+    if (idx >= 0) {
+      _state.worklog[idx] = { ..._state.worklog[idx], clockOut: clockOutTime, _offline: true, _clientId: clientId };
+    }
+    bus.emit("worklog:changed", _state.worklog[idx]);
+    bus.emit("offlineQueue:changed");
+    _cacheState();
+    return _state.worklog[idx];
+  }
 }
 
 function getActiveClockIn(taskId, userId) {
@@ -736,22 +944,44 @@ function getTotalSeconds(taskId, userId) {
 // --- Job submission ----------------------------------------------------------
 
 async function submitHourlyWork(taskId, userId) {
-  const result = await apiFetch("/api/completions/hourly", {
-    method: "POST",
-    body: JSON.stringify({ taskId, userId }),
-  });
-  // SSE will handle state update; only apply if SSE hasn't already
-  if (!_state.completions.find((c) => c.id === result.id)) {
-    _state.completions.push(result);
-    bus.emit("completion:added", result);
+  const clientId = uid();
+  const body = { taskId, userId, _clientId: clientId };
+
+  try {
+    const result = await apiFetch("/api/completions/hourly", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    // SSE will handle state update; only apply if SSE hasn't already
+    if (!_state.completions.find((c) => c.id === result.id)) {
+      _state.completions.push(result);
+      bus.emit("completion:added", result);
+    }
+    // Update job claim in cache
+    const claim = _state.jobClaims.find((c) => c.taskId === taskId && c.userId === userId);
+    if (claim) claim.status = "submitted";
+    // Remove worklog entries from cache
+    _state.worklog = _state.worklog.filter((e) => !(e.taskId === taskId && e.userId === userId));
+    bus.emit("jobclaims:changed");
+    return result;
+  } catch (e) {
+    if (!_isOfflineError(e)) throw e;
+    // Offline — queue and apply optimistic state
+    await offlineDB.enqueue({ clientId, endpoint: "/api/completions/hourly", method: "POST", body });
+    _registerBackgroundSync();
+    const optimistic = _buildOptimisticHourlyCompletion(taskId, userId, clientId);
+    _state.completions.push(optimistic);
+    bus.emit("completion:added", optimistic);
+    // Update job claim in cache
+    const claim = _state.jobClaims.find((c) => c.taskId === taskId && c.userId === userId);
+    if (claim) claim.status = "submitted";
+    // Remove worklog entries from cache
+    _state.worklog = _state.worklog.filter((e) => !(e.taskId === taskId && e.userId === userId));
+    bus.emit("jobclaims:changed");
+    bus.emit("offlineQueue:changed");
+    _cacheState();
+    return optimistic;
   }
-  // Update job claim in cache
-  const claim = _state.jobClaims.find((c) => c.taskId === taskId && c.userId === userId);
-  if (claim) claim.status = "submitted";
-  // Remove worklog entries from cache
-  _state.worklog = _state.worklog.filter((e) => !(e.taskId === taskId && e.userId === userId));
-  bus.emit("jobclaims:changed");
-  return result;
 }
 
 async function submitFixedJob(taskId, userId) {
@@ -780,6 +1010,10 @@ function _connectSSE() {
   if (_sseSource) return;
   try {
     _sseSource = new EventSource("/api/events/stream");
+    _sseSource.onopen = () => {
+      // SSE connected — server is definitely reachable
+      bus.emit("server:reachable");
+    };
     _sseSource.onerror = () => {
       _sseSource.close();
       _sseSource = null;
@@ -987,6 +1221,9 @@ function _applyState(data) {
   }
   _attachUserPrefs(_state.users);
 
+  // Persist to IndexedDB for offline access
+  _cacheState();
+
   // Notify all components so they re-render with the new data
   bus.emit("user:changed");
   bus.emit("tasks:changed");
@@ -1000,12 +1237,64 @@ function _applyState(data) {
   bus.emit("worklog:changed");
 }
 
+// --- State cache (IndexedDB persistence) ------------------------------------
+
+function _cacheState() {
+  if (typeof offlineDB !== "undefined") {
+    offlineDB.cacheState(_state); // async, fire-and-forget
+  }
+}
+
+async function _loadCachedState() {
+  if (typeof offlineDB === "undefined") return false;
+  try {
+    const cached = await offlineDB.getCachedState();
+    if (!cached) return false;
+    _state.users = cached.users || [];
+    _state.tasks = cached.tasks || [];
+    _state.currencies = cached.currencies || [];
+    _state.completions = cached.completions || [];
+    _state.shopItems = cached.shopItems || [];
+    _state.redemptions = cached.redemptions || [];
+    _state.jobClaims = cached.jobClaims || [];
+    _state.worklog = cached.worklog || [];
+    _state.balances = cached.balances || {};
+    for (const u of _state.users) {
+      u.balances = _state.balances[u.id] || {};
+    }
+    _attachUserPrefs(_state.users);
+    return true;
+  } catch (e) {
+    console.warn("Failed to load cached state:", e);
+    return false;
+  }
+}
+
 // --- Initialize on load ------------------------------------------------------
 
 // Load app store from localStorage synchronously
 appStore.load();
 
 async function initStores() {
+  // Step 1: Load cached state from IndexedDB so UI renders immediately (even offline)
+  const hasCached = await _loadCachedState();
+  if (hasCached) {
+    appStore.data.setupComplete = _state.users.length > 0;
+    appStore.save();
+    // Emit so components render with cached data
+    bus.emit("user:changed");
+    bus.emit("tasks:changed");
+    bus.emit("currencies:changed");
+    bus.emit("completions:changed");
+    bus.emit("shop:changed");
+    bus.emit("balances:changed");
+    bus.emit("completion:added");
+    bus.emit("redemption:added");
+    bus.emit("jobclaims:changed");
+    bus.emit("worklog:changed");
+  }
+
+  // Step 2: Try to fetch fresh state from server
   try {
     const data = await apiFetch("/api/state");
     _applyState(data);
@@ -1019,26 +1308,216 @@ async function initStores() {
     bus.emit("stores:synced");
   } catch (e) {
     console.warn("ParentSlop: initStores failed", e);
+    if (hasCached) {
+      // Offline with cached state — still functional
+      bus.emit("stores:synced");
+    }
+  }
+}
+
+// --- Offline queue replay on reconnect ---------------------------------------
+
+async function _replayOfflineQueue() {
+  if (typeof offlineDB === "undefined") return;
+  const pending = await offlineDB.getPending();
+  if (pending.length === 0) return;
+
+  console.log(`ParentSlop: replaying ${pending.length} offline queued writes...`);
+  for (const item of pending) {
+    try {
+      const result = await apiFetch(item.endpoint, {
+        method: item.method,
+        body: JSON.stringify(item.body),
+      });
+      _reconcileReplayResult(item, result);
+      await offlineDB.dequeue(item.clientId);
+    } catch (e) {
+      if (_isOfflineError(e)) {
+        console.warn("ParentSlop: still offline during replay, stopping");
+        break;
+      }
+      // Server rejected (4xx) — remove from queue and remove optimistic item
+      console.warn("ParentSlop: replay failed for", item.endpoint, e.message);
+      _removeOptimisticItem(item);
+      await offlineDB.dequeue(item.clientId);
+    }
+  }
+  bus.emit("offlineQueue:changed");
+}
+
+function _reconcileReplayResult(queueItem, serverResult) {
+  const clientId = queueItem.clientId;
+  const endpoint = queueItem.endpoint;
+
+  if (endpoint === "/api/completions" || endpoint === "/api/completions/hourly") {
+    const idx = _state.completions.findIndex((c) => c._clientId === clientId);
+    if (idx >= 0) {
+      // Replace optimistic with real server result
+      const old = _state.completions[idx];
+      _state.completions[idx] = serverResult;
+      // Adjust balances if rewards differ (server has real streak/timer bonuses)
+      if (old._offline && serverResult.status === "approved") {
+        _reconcileRewards(old.userId, old.rewards, serverResult.rewards);
+      }
+    } else if (!_state.completions.find((c) => c.id === serverResult.id)) {
+      _state.completions.push(serverResult);
+    }
+    bus.emit("completion:added", serverResult);
+  } else if (endpoint === "/api/redemptions") {
+    const redemption = serverResult.redemption || serverResult;
+    const idx = _state.redemptions.findIndex((r) => r._clientId === clientId);
+    if (idx >= 0) {
+      _state.redemptions[idx] = redemption;
+    } else if (!_state.redemptions.find((r) => r.id === redemption.id)) {
+      _state.redemptions.push(redemption);
+    }
+    bus.emit("redemption:added", redemption);
+  } else if (endpoint === "/api/job-claims") {
+    const idx = _state.jobClaims.findIndex((c) => c._clientId === clientId);
+    if (idx >= 0) {
+      _state.jobClaims[idx] = serverResult;
+    } else if (!_state.jobClaims.find((c) => c.id === serverResult.id)) {
+      _state.jobClaims.push(serverResult);
+    }
+    bus.emit("jobclaims:changed", serverResult);
+  } else if (endpoint === "/api/worklog" || endpoint.includes("/clock-out")) {
+    const idx = _state.worklog.findIndex((e) => e._clientId === clientId);
+    if (idx >= 0) {
+      _state.worklog[idx] = serverResult;
+    } else if (!_state.worklog.find((e) => e.id === serverResult.id)) {
+      _state.worklog.push(serverResult);
+    }
+    bus.emit("worklog:changed", serverResult);
+  }
+}
+
+function _reconcileRewards(userId, oldRewards, newRewards) {
+  if (!_state.balances[userId]) _state.balances[userId] = {};
+  // Subtract old optimistic rewards, add real server rewards
+  for (const [currId, oldAmt] of Object.entries(oldRewards || {})) {
+    _state.balances[userId][currId] = (getBalance(userId, currId) || 0) - oldAmt;
+  }
+  for (const [currId, newAmt] of Object.entries(newRewards || {})) {
+    _state.balances[userId][currId] = (getBalance(userId, currId) || 0) + newAmt;
+  }
+  const user = _state.users.find((u) => u.id === userId);
+  if (user) user.balances = { ..._state.balances[userId] };
+  bus.emit("balances:changed", { userId });
+}
+
+function _removeOptimisticItem(queueItem) {
+  const clientId = queueItem.clientId;
+  const endpoint = queueItem.endpoint;
+
+  if (endpoint === "/api/completions" || endpoint === "/api/completions/hourly") {
+    const idx = _state.completions.findIndex((c) => c._clientId === clientId);
+    if (idx >= 0) {
+      const removed = _state.completions[idx];
+      _state.completions.splice(idx, 1);
+      // Reverse optimistic balance changes
+      if (removed.status === "approved" && removed.rewards) {
+        if (!_state.balances[removed.userId]) _state.balances[removed.userId] = {};
+        for (const [currId, amt] of Object.entries(removed.rewards)) {
+          _state.balances[removed.userId][currId] = (getBalance(removed.userId, currId) || 0) - amt;
+        }
+        const user = _state.users.find((u) => u.id === removed.userId);
+        if (user) user.balances = { ..._state.balances[removed.userId] };
+        bus.emit("balances:changed", { userId: removed.userId });
+      }
+      bus.emit("completion:added");
+    }
+  } else if (endpoint === "/api/redemptions") {
+    const idx = _state.redemptions.findIndex((r) => r._clientId === clientId);
+    if (idx >= 0) {
+      const removed = _state.redemptions[idx];
+      _state.redemptions.splice(idx, 1);
+      // Reverse optimistic balance deduction
+      if (removed.costs) {
+        if (!_state.balances[removed.userId]) _state.balances[removed.userId] = {};
+        for (const [currId, cost] of Object.entries(removed.costs)) {
+          _state.balances[removed.userId][currId] = (getBalance(removed.userId, currId) || 0) + cost;
+        }
+        const user = _state.users.find((u) => u.id === removed.userId);
+        if (user) user.balances = { ..._state.balances[removed.userId] };
+        bus.emit("balances:changed", { userId: removed.userId });
+      }
+      bus.emit("redemption:added");
+    }
+  } else if (endpoint === "/api/job-claims") {
+    const idx = _state.jobClaims.findIndex((c) => c._clientId === clientId);
+    if (idx >= 0) {
+      _state.jobClaims.splice(idx, 1);
+      bus.emit("jobclaims:changed");
+    }
+  } else if (endpoint === "/api/worklog" || endpoint.includes("/clock-out")) {
+    const idx = _state.worklog.findIndex((e) => e._clientId === clientId);
+    if (idx >= 0) {
+      _state.worklog.splice(idx, 1);
+      bus.emit("worklog:changed");
+    }
   }
 }
 
 // --- Auto-reconnect ----------------------------------------------------------
 
 let _wasOffline = false;
+let _reconnectTimer = null;
+let _reconnectAttempt = 0;
+
+async function _probeServer() {
+  try {
+    const res = await fetch("/api/health", { method: "HEAD", cache: "no-store" });
+    if (res.ok) {
+      bus.emit("server:reachable");
+      return true;
+    }
+  } catch { /* still offline */ }
+  return false;
+}
+
+function _scheduleReconnect() {
+  if (_reconnectTimer) return; // already scheduled
+  // Backoff: 2s, 3s, 5s, 5s, 5s... (fast at first, then settle at 5s)
+  const delays = [2000, 3000, 5000];
+  const delay = delays[Math.min(_reconnectAttempt, delays.length - 1)];
+  _reconnectAttempt++;
+  _reconnectTimer = setTimeout(async () => {
+    _reconnectTimer = null;
+    const ok = await _probeServer();
+    if (!ok && _wasOffline) _scheduleReconnect(); // keep trying
+  }, delay);
+}
+
+function _cancelReconnect() {
+  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+  _reconnectAttempt = 0;
+}
+
 bus.on("server:unreachable", () => {
+  if (_wasOffline) return; // already handling it
   _wasOffline = true;
   if (_sseSource) { _sseSource.close(); _sseSource = null; }
+  _scheduleReconnect();
 });
+
 bus.on("server:reachable", () => {
   if (!_wasOffline) return;
   _wasOffline = false;
-  console.log("ParentSlop: connection restored, refreshing state...");
-  _refreshState().then(() => {
+  _cancelReconnect();
+  console.log("ParentSlop: connection restored, replaying queue then refreshing...");
+  _replayOfflineQueue().then(() => {
+    return _refreshState();
+  }).then(() => {
     _connectSSE();
+    _cacheState();
     bus.emit("stores:synced");
     console.log("ParentSlop: sync complete");
   });
 });
+
+// Browser online/offline events — probe immediately when browser says we're back
+window.addEventListener("online", () => _probeServer());
+window.addEventListener("offline", () => bus.emit("server:unreachable"));
 
 // --- Shared CSS constant -----------------------------------------------------
 
@@ -1328,6 +1807,20 @@ const TRACKER_CSS = `
     }
   }
 `;
+
+// --- Service Worker message handler ------------------------------------------
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "offline-queue-replayed") {
+      console.log("ParentSlop: SW replayed offline queue, refreshing state...");
+      _refreshState().then(() => {
+        bus.emit("offlineQueue:changed");
+        bus.emit("stores:synced");
+      });
+    }
+  });
+}
 
 // --- Expose globals ----------------------------------------------------------
 

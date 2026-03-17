@@ -1,7 +1,8 @@
-const CACHE_VERSION = 'parentslop-v12';
+const CACHE_VERSION = 'parentslop-v13';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
+  '/tracker/offline-queue.js',
   '/tracker/core.js',
   '/tracker/sfx.js',
   '/tracker/components/ps-auth-screen.js',
@@ -42,6 +43,79 @@ self.addEventListener('activate', (event) => {
   );
   self.clients.claim();
 });
+
+// Background sync: replay offline queue when connectivity returns
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'replay-offline-queue') {
+    event.waitUntil(replayFromSW());
+  }
+});
+
+async function replayFromSW() {
+  const DB_NAME = 'parentslop-offline';
+  const DB_VERSION = 1;
+
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('offlineQueue')) {
+          db.createObjectStore('offlineQueue', { keyPath: 'clientId' });
+        }
+        if (!db.objectStoreNames.contains('stateCache')) {
+          db.createObjectStore('stateCache', { keyPath: 'key' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  try {
+    const db = await openDB();
+
+    const items = await new Promise((resolve, reject) => {
+      const tx = db.transaction('offlineQueue', 'readonly');
+      const req = tx.objectStore('offlineQueue').getAll();
+      req.onsuccess = () => resolve(req.result.filter(i => i.status === 'pending').sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+      req.onerror = () => reject(req.error);
+    });
+
+    for (const item of items) {
+      try {
+        const res = await fetch(item.endpoint, {
+          method: item.method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(item.body),
+        });
+        if (res.ok || (res.status >= 400 && res.status < 500)) {
+          // Success or client error (won't retry) — dequeue
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction('offlineQueue', 'readwrite');
+            tx.objectStore('offlineQueue').delete(item.clientId);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+        } else {
+          // Server error — stop replaying, let sync retry later
+          break;
+        }
+      } catch {
+        // Network error — stop replaying
+        break;
+      }
+    }
+
+    // Notify open clients to refresh state
+    const clients = await self.clients.matchAll();
+    for (const client of clients) {
+      client.postMessage({ type: 'offline-queue-replayed' });
+    }
+  } catch (e) {
+    console.warn('SW: replay failed', e);
+  }
+}
 
 // Fetch strategy: network-first for API, cache-first for static assets
 self.addEventListener('fetch', (event) => {

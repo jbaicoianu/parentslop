@@ -329,6 +329,14 @@ function initDb() {
     )
   `);
 
+  // Migrate: add _client_id columns for offline queue idempotency
+  const clientIdTables = ['completions', 'redemptions', 'job_claims', 'worklog_entries'];
+  for (const table of clientIdTables) {
+    try { db.prepare(`SELECT _client_id FROM ${table} LIMIT 1`).get(); } catch {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN _client_id TEXT`);
+    }
+  }
+
   // Derived table (NOT a CRR — recomputed from events)
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_balances (
@@ -1339,8 +1347,14 @@ app.get("/api/completions", requireFamilyAuth, (req, res) => {
 
 // POST /api/completions — kid completes a task; server computes rewards
 app.post("/api/completions", requireFamilyAuth, (req, res) => {
-  const { taskId, userId, timerSeconds } = req.body;
+  const { taskId, userId, timerSeconds, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
+
+  // Idempotency: if _clientId was provided and already exists, return existing row
+  if (_clientId) {
+    const existing = db.prepare("SELECT * FROM completions WHERE _client_id = ? AND family_id = ?").get(_clientId, req.familyId);
+    if (existing) return res.json(completionRowToObj(existing));
+  }
 
   const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(taskId, req.familyId);
   if (!task) return res.status(404).json({ error: "task not found" });
@@ -1367,9 +1381,9 @@ app.post("/api/completions", requireFamilyAuth, (req, res) => {
   const id = crypto.randomUUID();
   const completedAt = new Date().toISOString();
 
-  db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, rewards, timer_seconds, streak_count, streak_multiplier, timer_multiplier, note, is_penalty, is_hourly, total_seconds, worklog)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, NULL, NULL)`)
-    .run(id, req.familyId, taskId, userId, status, completedAt, JSON.stringify(rewards), timerSeconds ?? null, newStreak, streakMultiplier, timerMultiplier);
+  db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, rewards, timer_seconds, streak_count, streak_multiplier, timer_multiplier, note, is_penalty, is_hourly, total_seconds, worklog, _client_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, NULL, NULL, ?)`)
+    .run(id, req.familyId, taskId, userId, status, completedAt, JSON.stringify(rewards), timerSeconds ?? null, newStreak, streakMultiplier, timerMultiplier, _clientId || null);
 
   if (status === "approved") {
     creditRewardsServer(req.familyId, userId, rewards);
@@ -1411,8 +1425,14 @@ app.post("/api/completions/penalty", requireFamilyAuth, requireAdmin, (req, res)
 
 // POST /api/completions/hourly — submit hourly work
 app.post("/api/completions/hourly", requireFamilyAuth, (req, res) => {
-  const { taskId, userId } = req.body;
+  const { taskId, userId, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
+
+  // Idempotency: if _clientId was provided and already exists, return existing row
+  if (_clientId) {
+    const existing = db.prepare("SELECT * FROM completions WHERE _client_id = ? AND family_id = ?").get(_clientId, req.familyId);
+    if (existing) return res.json(completionRowToObj(existing));
+  }
 
   const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(taskId, req.familyId);
   if (!task) return res.status(404).json({ error: "task not found" });
@@ -1450,9 +1470,9 @@ app.post("/api/completions/hourly", requireFamilyAuth, (req, res) => {
   const id = crypto.randomUUID();
   const completedAt = new Date().toISOString();
 
-  db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, rewards, streak_count, streak_multiplier, timer_multiplier, note, is_hourly, total_seconds, worklog)
-    VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, 1, 1, '', 1, ?, ?)`)
-    .run(id, req.familyId, taskId, userId, completedAt, JSON.stringify(rewards), totalSecs, JSON.stringify(worklog));
+  db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, rewards, streak_count, streak_multiplier, timer_multiplier, note, is_hourly, total_seconds, worklog, _client_id)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, 1, 1, '', 1, ?, ?, ?)`)
+    .run(id, req.familyId, taskId, userId, completedAt, JSON.stringify(rewards), totalSecs, JSON.stringify(worklog), _clientId || null);
 
   // Mark job claim as submitted
   db.prepare("UPDATE job_claims SET status = 'submitted' WHERE family_id = ? AND task_id = ? AND user_id = ?")
@@ -1566,8 +1586,14 @@ app.get("/api/redemptions", requireFamilyAuth, (req, res) => {
 });
 
 app.post("/api/redemptions", requireFamilyAuth, (req, res) => {
-  const { shopItemId, userId } = req.body;
+  const { shopItemId, userId, _clientId } = req.body;
   if (!shopItemId || !userId) return res.status(400).json({ error: "shopItemId and userId required" });
+
+  // Idempotency: if _clientId was provided and already exists, return existing row
+  if (_clientId) {
+    const existing = db.prepare("SELECT * FROM redemptions WHERE _client_id = ? AND family_id = ?").get(_clientId, req.familyId);
+    if (existing) return res.json({ ok: true, redemption: redemptionRowToObj(existing) });
+  }
 
   const item = db.prepare("SELECT * FROM shop_items WHERE id = ? AND family_id = ?").get(shopItemId, req.familyId);
   if (!item) return res.status(404).json({ error: "item not found" });
@@ -1590,8 +1616,8 @@ app.post("/api/redemptions", requireFamilyAuth, (req, res) => {
 
   const id = crypto.randomUUID();
   const purchasedAt = new Date().toISOString();
-  db.prepare("INSERT INTO redemptions (id, family_id, shop_item_id, user_id, costs, purchased_at, fulfilled) VALUES (?, ?, ?, ?, ?, ?, 0)")
-    .run(id, req.familyId, shopItemId, userId, JSON.stringify(costs), purchasedAt);
+  db.prepare("INSERT INTO redemptions (id, family_id, shop_item_id, user_id, costs, purchased_at, fulfilled, _client_id) VALUES (?, ?, ?, ?, ?, ?, 0, ?)")
+    .run(id, req.familyId, shopItemId, userId, JSON.stringify(costs), purchasedAt, _clientId || null);
 
   const row = db.prepare("SELECT * FROM redemptions WHERE id = ?").get(id);
   const obj = redemptionRowToObj(row);
@@ -1633,8 +1659,14 @@ app.get("/api/job-claims", requireFamilyAuth, (req, res) => {
 });
 
 app.post("/api/job-claims", requireFamilyAuth, (req, res) => {
-  const { taskId, userId } = req.body;
+  const { taskId, userId, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
+
+  // Idempotency: if _clientId was provided and already exists, return existing row
+  if (_clientId) {
+    const byClientId = db.prepare("SELECT * FROM job_claims WHERE _client_id = ? AND family_id = ?").get(_clientId, req.familyId);
+    if (byClientId) return res.json(jobClaimRowToObj(byClientId));
+  }
 
   const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(taskId, req.familyId);
   if (!task) return res.status(404).json({ error: "task not found" });
@@ -1651,8 +1683,8 @@ app.post("/api/job-claims", requireFamilyAuth, (req, res) => {
 
   const id = crypto.randomUUID();
   const acceptedAt = new Date().toISOString();
-  db.prepare("INSERT INTO job_claims (id, family_id, task_id, user_id, status, accepted_at) VALUES (?, ?, ?, ?, 'active', ?)")
-    .run(id, req.familyId, taskId, userId, acceptedAt);
+  db.prepare("INSERT INTO job_claims (id, family_id, task_id, user_id, status, accepted_at, _client_id) VALUES (?, ?, ?, ?, 'active', ?, ?)")
+    .run(id, req.familyId, taskId, userId, acceptedAt, _clientId || null);
 
   const row = db.prepare("SELECT * FROM job_claims WHERE id = ?").get(id);
   const obj = jobClaimRowToObj(row);
@@ -1683,8 +1715,14 @@ app.get("/api/worklog", requireFamilyAuth, (req, res) => {
 });
 
 app.post("/api/worklog", requireFamilyAuth, (req, res) => {
-  const { taskId, userId } = req.body;
+  const { taskId, userId, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
+
+  // Idempotency: if _clientId was provided and already exists, return existing row
+  if (_clientId) {
+    const byClientId = db.prepare("SELECT * FROM worklog_entries WHERE _client_id = ? AND family_id = ?").get(_clientId, req.familyId);
+    if (byClientId) return res.json(worklogRowToObj(byClientId));
+  }
 
   // Check if already clocked in
   const open = db.prepare("SELECT * FROM worklog_entries WHERE family_id = ? AND task_id = ? AND user_id = ? AND clock_out IS NULL").get(req.familyId, taskId, userId);
@@ -1692,8 +1730,8 @@ app.post("/api/worklog", requireFamilyAuth, (req, res) => {
 
   const id = crypto.randomUUID();
   const clockIn = new Date().toISOString();
-  db.prepare("INSERT INTO worklog_entries (id, family_id, task_id, user_id, clock_in) VALUES (?, ?, ?, ?, ?)")
-    .run(id, req.familyId, taskId, userId, clockIn);
+  db.prepare("INSERT INTO worklog_entries (id, family_id, task_id, user_id, clock_in, _client_id) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(id, req.familyId, taskId, userId, clockIn, _clientId || null);
 
   const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(id);
   const obj = worklogRowToObj(row);
