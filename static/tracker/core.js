@@ -968,6 +968,18 @@ function _applyState(data) {
     u.balances = _state.balances[u.id] || {};
   }
   _attachUserPrefs(_state.users);
+
+  // Notify all components so they re-render with the new data
+  bus.emit("user:changed");
+  bus.emit("tasks:changed");
+  bus.emit("currencies:changed");
+  bus.emit("completions:changed");
+  bus.emit("shop:changed");
+  bus.emit("balances:changed");
+  bus.emit("completion:added");
+  bus.emit("redemption:added");
+  bus.emit("jobclaims:changed");
+  bus.emit("worklog:changed");
 }
 
 // --- Initialize on load ------------------------------------------------------
