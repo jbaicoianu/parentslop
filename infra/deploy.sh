@@ -85,6 +85,48 @@ docker build -t "parentslop:$IMAGE_TAG" "$(dirname "$0")/.."
 docker tag "parentslop:$IMAGE_TAG" "$ECR_URI:$IMAGE_TAG"
 docker push "$ECR_URI:$IMAGE_TAG"
 
+# --- Pre-seed origin DNS record ---
+echo ""
+echo "--- Pre-seeding origin DNS record ---"
+TASK_ARN=$(aws ecs list-tasks --region "$REGION" \
+  --cluster parentslop --service parentslop \
+  --desired-status RUNNING --query 'taskArns[0]' --output text 2>/dev/null || echo "None")
+
+if [ "$TASK_ARN" != "None" ] && [ -n "$TASK_ARN" ]; then
+  ENI_ID=$(aws ecs describe-tasks --region "$REGION" \
+    --cluster parentslop --tasks "$TASK_ARN" \
+    --query 'tasks[0].attachments[?type==`ElasticNetworkInterface`].details[?name==`networkInterfaceId`].value | [0][0]' \
+    --output text)
+  if [ "$ENI_ID" != "None" ] && [ -n "$ENI_ID" ]; then
+    PUBLIC_IP=$(aws ec2 describe-network-interfaces --region "$REGION" \
+      --network-interface-ids "$ENI_ID" \
+      --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+    if [ "$PUBLIC_IP" != "None" ] && [ -n "$PUBLIC_IP" ]; then
+      echo "Pre-seeding origin.parentslop.com -> $PUBLIC_IP"
+      aws route53 change-resource-record-sets \
+        --hosted-zone-id "$HZ_PARENTSLOP" \
+        --change-batch "{
+          \"Changes\": [{
+            \"Action\": \"UPSERT\",
+            \"ResourceRecordSet\": {
+              \"Name\": \"origin.parentslop.com\",
+              \"Type\": \"A\",
+              \"TTL\": 15,
+              \"ResourceRecords\": [{\"Value\": \"$PUBLIC_IP\"}]
+            }
+          }]
+        }"
+      echo "DNS pre-seeded."
+    else
+      echo "WARNING: No public IP found for current task. DNS pre-seed skipped."
+    fi
+  else
+    echo "WARNING: No ENI found for current task. DNS pre-seed skipped."
+  fi
+else
+  echo "NOTE: No running task found (first deploy?). DNS pre-seed skipped."
+fi
+
 # --- Deploy CloudFormation stack ---
 echo ""
 echo "--- Deploying CloudFormation stack ---"

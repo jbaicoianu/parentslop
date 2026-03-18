@@ -222,29 +222,10 @@ Resources:
               ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/parentslop/sync-secret'
           Essential: true
 
-  # --- Service Discovery (Cloud Map) ---
-  CloudMapNamespace:
-    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
-    Properties:
-      Name: parentslop.local
-      Vpc: !Ref VpcId
-
-  CloudMapService:
-    Type: AWS::ServiceDiscovery::Service
-    Properties:
-      Name: app
-      NamespaceId: !Ref CloudMapNamespace
-      DnsConfig:
-        DnsRecords:
-          - Type: SRV
-            TTL: 15
-      HealthCheckCustomConfig:
-        FailureThreshold: 1
-
   # --- ECS Service ---
   ECSService:
     Type: AWS::ECS::Service
-    DependsOn: [EFSMountTarget0, EFSMountTarget1, ApiRoute]
+    DependsOn: [EFSMountTarget0, EFSMountTarget1]
     Properties:
       Cluster: !Ref ECSCluster
       ServiceName: parentslop
@@ -258,54 +239,114 @@ Resources:
           AssignPublicIp: ENABLED
           Subnets: !Ref SubnetIds
           SecurityGroups: [!Ref ECSSecurityGroup]
-      ServiceRegistries:
-        - RegistryArn: !GetAtt CloudMapService.Arn
-          ContainerPort: 8080
-          ContainerName: parentslop
       EnableExecuteCommand: true
       DeploymentConfiguration:
         DeploymentCircuitBreaker:
           Enable: true
           Rollback: true
 
-  # --- API Gateway HTTP API ---
-  VpcLink:
-    Type: AWS::ApiGatewayV2::VpcLink
+  # --- Origin DNS Updater (Lambda + EventBridge) ---
+  OriginUpdaterRole:
+    Type: AWS::IAM::Role
     Properties:
-      Name: parentslop
-      SubnetIds: !Ref SubnetIds
-      SecurityGroupIds: [!Ref ECSSecurityGroup]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: origin-updater
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeTasks
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                Resource: !Sub 'arn:aws:route53:::hostedzone/${HostedZoneIdParentslop}'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
 
-  HttpApi:
-    Type: AWS::ApiGatewayV2::Api
+  OriginUpdater:
+    Type: AWS::Lambda::Function
     Properties:
-      Name: parentslop
-      ProtocolType: HTTP
+      FunctionName: parentslop-origin-updater
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt OriginUpdaterRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          HOSTED_ZONE_ID: !Ref HostedZoneIdParentslop
+          RECORD_NAME: origin.parentslop.com
+      Code:
+        ZipFile: |
+          import boto3, json, os
+          ecs = boto3.client('ecs')
+          ec2 = boto3.client('ec2')
+          r53 = boto3.client('route53')
+          def handler(event, context):
+              print(json.dumps(event))
+              d = event['detail']
+              task = ecs.describe_tasks(cluster=d['clusterArn'], tasks=[d['taskArn']])['tasks'][0]
+              eni_id = None
+              for a in task.get('attachments', []):
+                  if a['type'] == 'ElasticNetworkInterface':
+                      for kv in a['details']:
+                          if kv['name'] == 'networkInterfaceId':
+                              eni_id = kv['value']
+              if not eni_id:
+                  print('No ENI found'); return
+              eni = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])['NetworkInterfaces'][0]
+              ip = eni.get('Association', {}).get('PublicIp')
+              if not ip:
+                  print('No public IP'); return
+              print(f'Updating {os.environ["RECORD_NAME"]} -> {ip}')
+              r53.change_resource_record_sets(
+                  HostedZoneId=os.environ['HOSTED_ZONE_ID'],
+                  ChangeBatch={'Changes': [{'Action': 'UPSERT', 'ResourceRecordSet': {
+                      'Name': os.environ['RECORD_NAME'], 'Type': 'A', 'TTL': 15,
+                      'ResourceRecords': [{'Value': ip}]}}]})
+              print('Done')
 
-  ApiIntegration:
-    Type: AWS::ApiGatewayV2::Integration
+  OriginUpdaterRule:
+    Type: AWS::Events::Rule
     Properties:
-      ApiId: !Ref HttpApi
-      IntegrationType: HTTP_PROXY
-      IntegrationMethod: ANY
-      ConnectionType: VPC_LINK
-      ConnectionId: !Ref VpcLink
-      IntegrationUri: !GetAtt CloudMapService.Arn
-      PayloadFormatVersion: '1.0'
+      Name: parentslop-origin-updater
+      EventPattern:
+        source:
+          - aws.ecs
+        detail-type:
+          - ECS Task State Change
+        detail:
+          clusterArn:
+            - !GetAtt ECSCluster.Arn
+          lastStatus:
+            - RUNNING
+      Targets:
+        - Id: origin-updater
+          Arn: !GetAtt OriginUpdater.Arn
 
-  ApiRoute:
-    Type: AWS::ApiGatewayV2::Route
+  OriginUpdaterPermission:
+    Type: AWS::Lambda::Permission
     Properties:
-      ApiId: !Ref HttpApi
-      RouteKey: '$default'
-      Target: !Sub 'integrations/${ApiIntegration}'
-
-  ApiStage:
-    Type: AWS::ApiGatewayV2::Stage
-    Properties:
-      ApiId: !Ref HttpApi
-      StageName: '$default'
-      AutoDeploy: true
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref OriginUpdater
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt OriginUpdaterRule.Arn
 
   # --- CloudFront ---
   CloudFrontDistribution:
@@ -324,13 +365,15 @@ Resources:
           SslSupportMethod: sni-only
           MinimumProtocolVersion: TLSv1.2_2021
         Origins:
-          - Id: api
-            DomainName: !Sub '${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+          - Id: app
+            DomainName: origin.parentslop.com
             CustomOriginConfig:
-              OriginProtocolPolicy: https-only
-              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+              HTTPPort: 8080
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
         DefaultCacheBehavior:
-          TargetOriginId: api
+          TargetOriginId: app
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
@@ -380,8 +423,8 @@ Resources:
 Outputs:
   CloudFrontDomain:
     Value: !GetAtt CloudFrontDistribution.DomainName
-  ApiGatewayUrl:
-    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  OriginDns:
+    Value: origin.parentslop.com
   EFSFileSystemId:
     Value: !Ref EFSFileSystem
   BackupBucket:
