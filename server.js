@@ -1822,6 +1822,11 @@ app.post("/api/sync/changes", requireSyncAuth, (req, res) => {
     }
   });
   applyAll(changes);
+  // Recompute derived balances for all families affected by synced data
+  if (changes.some(c => ["completions", "redemptions", "balance_adjustments"].includes(c.table))) {
+    const families = db.prepare("SELECT DISTINCT id FROM families").all();
+    for (const f of families) recomputeBalances(f.id);
+  }
   res.json({ ok: true, applied: changes.length });
 });
 
@@ -1847,6 +1852,11 @@ async function syncWithPeer(peerUrl) {
       }
     });
     applyAll(pullData.changes);
+    // Recompute derived balances if completions/redemptions/adjustments were synced
+    if (pullData.changes.some(c => ["completions", "redemptions", "balance_adjustments"].includes(c.table))) {
+      const families = db.prepare("SELECT DISTINCT id FROM families").all();
+      for (const f of families) recomputeBalances(f.id);
+    }
     console.log(`Sync: pulled ${pullData.changes.length} changes from ${peerUrl}`);
   }
 
@@ -2210,6 +2220,10 @@ ensureHealthyDb().then(() => {
 }).then(() => {
   migrateStoresToTables();
 }).then(() => {
+  // Recompute derived balances on startup (handles backup restores + missed recomputes)
+  const families = db.prepare("SELECT DISTINCT id FROM families").all();
+  for (const f of families) recomputeBalances(f.id);
+
   const server = app.listen(PORT, () => {
     const actualPort = server.address().port;
     console.log(`ParentSlop server running on http://localhost:${actualPort}`);
