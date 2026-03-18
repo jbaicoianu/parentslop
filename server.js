@@ -468,8 +468,7 @@ const ADMIN_WRITE_KEYS = new Set([
   "parentslop.tasks.v1",
   "parentslop.currencies.v1",
   "parentslop.shop.v1",
-  // Note: parentslop.users.v1 is NOT admin-only because kids need to persist
-  // balance changes when completing tasks (adjustBalance → usersStore.save).
+  "parentslop.users.v1",
 ]);
 
 // --- Middleware ---------------------------------------------------------------

@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "start:dev": "nodemon --watch server.js --watch tracker/ --ext js,json,html server.js"
+    "start:dev": "nodemon --watch server.js --watch tracker/ --ext js,json,html server.js",
+    "test": "node tests/run-all.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1009.0",
