@@ -1,9 +1,10 @@
-// ps-history: Completion + redemption history for the current user
+// ps-history: History container with List / Calendar / Chart sub-tabs
 class PsHistory extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._tab = "completions"; // completions | purchases
+    this._view = "list"; // list | calendar | chart
+    this._listTab = "completions"; // completions | purchases (within list view)
     this._unsubs = [];
   }
 
@@ -35,9 +36,18 @@ class PsHistory extends HTMLElement {
       .filter((r) => r.userId === user.id)
       .sort((a, b) => b.purchasedAt.localeCompare(a.purchasedAt));
 
+    let contentHTML;
+    if (this._view === "calendar") {
+      contentHTML = `<ps-calendar-view></ps-calendar-view>`;
+    } else if (this._view === "chart") {
+      contentHTML = `<ps-balance-chart></ps-balance-chart>`;
+    } else {
+      contentHTML = this._renderList(completions, purchases);
+    }
+
     this.shadowRoot.innerHTML = `
       <style>${tracker.TRACKER_CSS}
-        .tabs {
+        .view-tabs {
           display: flex;
           gap: 2px;
           margin-bottom: 12px;
@@ -46,7 +56,7 @@ class PsHistory extends HTMLElement {
           border-radius: 10px;
           padding: 3px;
         }
-        .tab-btn {
+        .view-tab {
           appearance: none;
           border: none;
           background: transparent;
@@ -60,12 +70,43 @@ class PsHistory extends HTMLElement {
           text-align: center;
           transition: background 160ms ease-out, color 160ms ease-out;
         }
-        .tab-btn.active {
+        .view-tab.active {
           background: radial-gradient(circle at top left, #2b344e, #1b1e34);
           color: var(--accent);
         }
-        .tab-btn:not(.active):hover {
+        .view-tab:not(.active):hover {
           background: rgba(255,255,255,0.04);
+        }
+
+        .list-tabs {
+          display: flex;
+          gap: 2px;
+          margin-bottom: 12px;
+          background: rgba(255,255,255,0.02);
+          border: 1px solid var(--border-subtle);
+          border-radius: 8px;
+          padding: 2px;
+        }
+        .list-tab {
+          appearance: none;
+          border: none;
+          background: transparent;
+          color: var(--muted);
+          font-size: 0.75rem;
+          font-family: inherit;
+          padding: 5px 12px;
+          border-radius: 6px;
+          cursor: pointer;
+          flex: 1;
+          text-align: center;
+          transition: background 160ms ease-out, color 160ms ease-out;
+        }
+        .list-tab.active {
+          background: rgba(255,255,255,0.06);
+          color: var(--text);
+        }
+        .list-tab:not(.active):hover {
+          background: rgba(255,255,255,0.03);
         }
 
         .entry {
@@ -107,27 +148,47 @@ class PsHistory extends HTMLElement {
         <div class="panel-title">History</div>
         <div class="panel-subtitle mb-3">Your activity log</div>
 
-        <div class="tabs">
-          <button class="tab-btn ${this._tab === "completions" ? "active" : ""}" data-tab="completions">
-            Tasks (${completions.length})
-          </button>
-          <button class="tab-btn ${this._tab === "purchases" ? "active" : ""}" data-tab="purchases">
-            Purchases (${purchases.length})
-          </button>
+        <div class="view-tabs">
+          <button class="view-tab ${this._view === "list" ? "active" : ""}" data-view="list">List</button>
+          <button class="view-tab ${this._view === "calendar" ? "active" : ""}" data-view="calendar">Calendar</button>
+          <button class="view-tab ${this._view === "chart" ? "active" : ""}" data-view="chart">Chart</button>
         </div>
 
-        <div class="scroll-y">
-          ${this._tab === "completions" ? this._renderCompletions(completions) : this._renderPurchases(purchases)}
-        </div>
+        ${contentHTML}
       </div>
     `;
 
-    this.shadowRoot.querySelectorAll(".tab-btn").forEach((btn) => {
+    // View tab switching
+    this.shadowRoot.querySelectorAll(".view-tab").forEach((btn) => {
       btn.addEventListener("click", () => {
-        this._tab = btn.dataset.tab;
+        this._view = btn.dataset.view;
         this.render();
       });
     });
+
+    // List sub-tab switching
+    this.shadowRoot.querySelectorAll(".list-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this._listTab = btn.dataset.tab;
+        this.render();
+      });
+    });
+  }
+
+  _renderList(completions, purchases) {
+    return `
+      <div class="list-tabs">
+        <button class="list-tab ${this._listTab === "completions" ? "active" : ""}" data-tab="completions">
+          Tasks (${completions.length})
+        </button>
+        <button class="list-tab ${this._listTab === "purchases" ? "active" : ""}" data-tab="purchases">
+          Purchases (${purchases.length})
+        </button>
+      </div>
+      <div class="scroll-y">
+        ${this._listTab === "completions" ? this._renderCompletions(completions) : this._renderPurchases(purchases)}
+      </div>
+    `;
   }
 
   _renderCompletions(completions) {
@@ -148,7 +209,7 @@ class PsHistory extends HTMLElement {
 
       return `
         <div class="entry">
-          <div class="entry-icon ${isPenalty ? "penalty" : "earned"}">${isPenalty ? "−" : "✓"}</div>
+          <div class="entry-icon ${isPenalty ? "penalty" : "earned"}">${isPenalty ? "\u2212" : "\u2713"}</div>
           <div class="entry-info">
             <div class="entry-title">${task?.name || "Unknown"}</div>
             <div class="entry-meta">
@@ -160,7 +221,7 @@ class PsHistory extends HTMLElement {
             </div>
             ${c.note ? `<div class="entry-note">${c.note}</div>` : ""}
           </div>
-          <div class="entry-reward ${totalPositive ? "positive" : "negative"}">${rewardText || "—"}</div>
+          <div class="entry-reward ${totalPositive ? "positive" : "negative"}">${rewardText || "\u2014"}</div>
         </div>
       `;
     }).join("");
@@ -180,7 +241,7 @@ class PsHistory extends HTMLElement {
 
       return `
         <div class="entry">
-          <div class="entry-icon purchase">★</div>
+          <div class="entry-icon purchase">\u2605</div>
           <div class="entry-info">
             <div class="entry-title">${item?.name || "Unknown"}</div>
             <div class="entry-meta">
@@ -190,7 +251,7 @@ class PsHistory extends HTMLElement {
                 : `<span class="badge badge-pending">Pending</span>`}
             </div>
           </div>
-          <div class="entry-reward negative">−${costText || "Free"}</div>
+          <div class="entry-reward negative">\u2212${costText || "Free"}</div>
         </div>
       `;
     }).join("");

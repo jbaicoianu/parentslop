@@ -988,6 +988,14 @@ function worklogRowToObj(row) {
   };
 }
 
+function balanceAdjustmentRowToObj(row) {
+  return {
+    id: row.id, familyId: row.family_id, userId: row.user_id,
+    currencyId: row.currency_id, delta: row.delta, note: row.note,
+    createdAt: row.created_at,
+  };
+}
+
 // --- Server-side reward computation ------------------------------------------
 
 function dateKeyServer(iso) {
@@ -1108,6 +1116,7 @@ app.get("/api/state", requireFamilyAuth, (req, res) => {
   const redemptions = db.prepare("SELECT * FROM redemptions WHERE family_id = ?").all(fid).map(redemptionRowToObj);
   const jobClaims = db.prepare("SELECT * FROM job_claims WHERE family_id = ?").all(fid).map(jobClaimRowToObj);
   const worklog = db.prepare("SELECT * FROM worklog_entries WHERE family_id = ?").all(fid).map(worklogRowToObj);
+  const balanceAdjustments = db.prepare("SELECT * FROM balance_adjustments WHERE family_id = ?").all(fid).map(balanceAdjustmentRowToObj);
 
   // Build balances map: { userId: { currencyId: amount } }
   const balanceRows = db.prepare("SELECT * FROM user_balances WHERE family_id = ?").all(fid);
@@ -1122,7 +1131,7 @@ app.get("/api/state", requireFamilyAuth, (req, res) => {
     u.balances = balances[u.id] || {};
   }
 
-  res.json({ users, tasks, currencies, completions, shopItems, redemptions, jobClaims, worklog, balances });
+  res.json({ users, tasks, currencies, completions, shopItems, redemptions, jobClaims, worklog, balances, balanceAdjustments });
 });
 
 // --- Typed API: Config CRUD --------------------------------------------------

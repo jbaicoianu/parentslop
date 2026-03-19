@@ -46,6 +46,7 @@ const _state = {
   jobClaims: [],
   worklog: [],
   balances: {}, // { userId: { currencyId: amount } }
+  balanceAdjustments: [],
 };
 
 // --- StateProxy (backward compat for trackerStore.*.data) --------------------
@@ -108,6 +109,7 @@ const shopProxy = new StateProxy("shopItems");
 const redemptionProxy = new StateProxy("redemptions");
 const jobClaimProxy = new StateProxy("jobClaims");
 const worklogProxy = new StateProxy("worklog");
+const balanceAdjustmentProxy = new StateProxy("balanceAdjustments");
 const appStore = new AppStore();
 
 // --- Local user preferences (persisted to localStorage) ----------------------
@@ -1213,6 +1215,7 @@ function _applyState(data) {
   _state.redemptions = data.redemptions || [];
   _state.jobClaims = data.jobClaims || [];
   _state.worklog = data.worklog || [];
+  _state.balanceAdjustments = data.balanceAdjustments || [];
   _state.balances = data.balances || {};
 
   // Attach balances to user objects for backward compat
@@ -1258,6 +1261,7 @@ async function _loadCachedState() {
     _state.redemptions = cached.redemptions || [];
     _state.jobClaims = cached.jobClaims || [];
     _state.worklog = cached.worklog || [];
+    _state.balanceAdjustments = cached.balanceAdjustments || [];
     _state.balances = cached.balances || {};
     for (const u of _state.users) {
       u.balances = _state.balances[u.id] || {};
@@ -1822,6 +1826,70 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+// --- Balance timeline builder ------------------------------------------------
+
+function buildBalanceTimeline(userId) {
+  const events = [];
+
+  // Completions (approved only)
+  for (const c of _state.completions) {
+    if (c.userId !== userId || c.status !== "approved") continue;
+    const task = _state.tasks.find(t => t.id === c.taskId);
+    const isPenalty = c.isPenalty || task?.isPenalty;
+    const deltas = {};
+    for (const [cid, amt] of Object.entries(c.rewards || {})) {
+      deltas[cid] = (deltas[cid] || 0) + amt;
+    }
+    events.push({
+      date: c.completedAt,
+      type: isPenalty ? "penalty" : "earned",
+      label: task?.name || "Unknown task",
+      deltas,
+    });
+  }
+
+  // Redemptions (purchases)
+  for (const r of _state.redemptions) {
+    if (r.userId !== userId) continue;
+    const item = _state.shopItems.find(s => s.id === r.shopItemId);
+    const deltas = {};
+    for (const [cid, amt] of Object.entries(r.costs || {})) {
+      deltas[cid] = -(deltas[cid] || 0) - amt;
+    }
+    events.push({
+      date: r.purchasedAt,
+      type: "purchase",
+      label: item?.name || "Unknown item",
+      deltas,
+    });
+  }
+
+  // Balance adjustments
+  for (const a of _state.balanceAdjustments) {
+    if (a.userId !== userId) continue;
+    events.push({
+      date: a.createdAt,
+      type: "adjustment",
+      label: a.note || "Balance adjustment",
+      deltas: { [a.currencyId]: a.delta },
+    });
+  }
+
+  // Sort ascending by date
+  events.sort((a, b) => a.date.localeCompare(b.date));
+
+  // Compute running balances
+  const running = {};
+  for (const ev of events) {
+    for (const [cid, amt] of Object.entries(ev.deltas)) {
+      running[cid] = (running[cid] || 0) + amt;
+    }
+    ev.runningBalance = { ...running };
+  }
+
+  return events;
+}
+
 // --- Expose globals ----------------------------------------------------------
 
 window.eventBus = bus;
@@ -1835,6 +1903,7 @@ window.trackerStore = {
   app: appStore,
   jobClaims: jobClaimProxy,
   worklog: worklogProxy,
+  balanceAdjustments: balanceAdjustmentProxy,
 };
 window.tracker = {
   initStores,
@@ -1891,5 +1960,6 @@ window.tracker = {
   submitFixedJob,
   getUserPref,
   setUserPref,
+  buildBalanceTimeline,
   TRACKER_CSS,
 };
