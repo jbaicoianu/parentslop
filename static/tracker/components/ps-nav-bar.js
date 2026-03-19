@@ -6,6 +6,7 @@ class PsNavBar extends HTMLElement {
     this._unsubs = [];
     this._offline = false;
     this._queueCount = 0;
+    this._banner = null; // body-level offline banner element
   }
 
   connectedCallback() {
@@ -19,21 +20,80 @@ class PsNavBar extends HTMLElement {
       eventBus.on("offlineQueue:changed", () => this._updateQueueCount()),
     );
     if (!navigator.onLine) this._offline = true;
+    this._ensureBanner();
     this.render();
   }
 
   disconnectedCallback() {
     this._unsubs.forEach((u) => u());
+    if (this._banner && this._banner.parentNode) {
+      this._banner.parentNode.removeChild(this._banner);
+    }
+    this._banner = null;
+  }
+
+  _ensureBanner() {
+    if (this._banner) return;
+    const el = document.createElement("div");
+    el.id = "offline-banner";
+    el.style.cssText = `
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px 14px;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10000;
+      border-radius: 0 0 12px 12px;
+      background: rgba(241, 196, 15, 0.15);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(241, 196, 15, 0.3);
+      border-top: none;
+      color: #f1c40f;
+      font-size: 0.8rem;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      animation: offline-pulse 2s ease-in-out infinite;
+    `;
+    el.innerHTML = `
+      <span style="font-size:1rem; flex-shrink:0;">\u26A1</span>
+      <span>
+        <span style="font-weight:500;">Offline</span>
+        <span class="queue-count" style="font-size:0.7rem; opacity:0.75; font-weight:400;"> \u2014 changes saved locally, will sync when reconnected</span>
+      </span>
+    `;
+
+    // Add the pulse keyframes if not already present
+    if (!document.getElementById("offline-pulse-style")) {
+      const style = document.createElement("style");
+      style.id = "offline-pulse-style";
+      style.textContent = `
+        @keyframes offline-pulse {
+          0%, 100% { border-color: rgba(241, 196, 15, 0.3); }
+          50% { border-color: rgba(241, 196, 15, 0.6); }
+        }
+        @media (max-width: 520px) {
+          #offline-banner { font-size: 0.72rem !important; padding: 6px 10px !important; }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    document.body.appendChild(el);
+    this._banner = el;
   }
 
   _updateBanner() {
-    const banner = this.shadowRoot.querySelector(".offline-banner");
-    if (banner) banner.style.display = this._offline ? "flex" : "none";
-    const countEl = this.shadowRoot.querySelector(".queue-count");
+    this._ensureBanner();
+    this._banner.style.display = this._offline ? "flex" : "none";
+    const countEl = this._banner.querySelector(".queue-count");
     if (countEl) {
       countEl.textContent = this._queueCount > 0
-        ? `${this._queueCount} change${this._queueCount !== 1 ? "s" : ""} queued, will sync when reconnected`
-        : "changes saved locally, will sync when reconnected";
+        ? ` \u2014 ${this._queueCount} change${this._queueCount !== 1 ? "s" : ""} queued, will sync when reconnected`
+        : " \u2014 changes saved locally, will sync when reconnected";
     }
   }
 
@@ -49,14 +109,14 @@ class PsNavBar extends HTMLElement {
   _getTabs() {
     const isAdmin = tracker.isCurrentUserAdmin();
     const tabs = [
-      { id: "dashboard", label: "Dashboard", icon: "◉" },
-      { id: "tasks", label: "Tasks", icon: "✓" },
-      { id: "shop", label: "Shop", icon: "★" },
-      { id: "history", label: "History", icon: "⌚" },
-      { id: "games", label: "Games", icon: "▶" },
+      { id: "dashboard", label: "Dashboard", icon: "\u25C9" },
+      { id: "tasks", label: "Tasks", icon: "\u2713" },
+      { id: "shop", label: "Shop", icon: "\u2605" },
+      { id: "history", label: "History", icon: "\u231A" },
+      { id: "games", label: "Games", icon: "\u25B6" },
     ];
     if (isAdmin) {
-      tabs.push({ id: "admin", label: "Admin", icon: "⚙" });
+      tabs.push({ id: "admin", label: "Admin", icon: "\u2699" });
     }
     return tabs;
   }
@@ -70,6 +130,9 @@ class PsNavBar extends HTMLElement {
     const current = app.currentView || "dashboard";
     const tabs = this._getTabs();
     const pendingCount = this._getPendingCount();
+
+    // Update body-level banner
+    this._updateBanner();
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -139,48 +202,6 @@ class PsNavBar extends HTMLElement {
           padding: 0 4px;
         }
 
-        .offline-banner {
-          display: none;
-          align-items: center;
-          justify-content: center;
-          gap: 8px;
-          padding: 8px 14px;
-          position: fixed;
-          top: 0;
-          left: 0;
-          right: 0;
-          z-index: 10000;
-          border-radius: 0 0 12px 12px;
-          background: rgba(241, 196, 15, 0.15);
-          backdrop-filter: blur(12px);
-          -webkit-backdrop-filter: blur(12px);
-          border: 1px solid rgba(241, 196, 15, 0.3);
-          border-top: none;
-          color: #f1c40f;
-          font-size: 0.8rem;
-          animation: offline-pulse 2s ease-in-out infinite;
-        }
-
-        .offline-banner .offline-icon {
-          font-size: 1rem;
-          flex-shrink: 0;
-        }
-
-        .offline-banner .offline-text {
-          font-weight: 500;
-        }
-
-        .offline-banner .offline-sub {
-          font-size: 0.7rem;
-          opacity: 0.75;
-          font-weight: 400;
-        }
-
-        @keyframes offline-pulse {
-          0%, 100% { border-color: rgba(241, 196, 15, 0.3); }
-          50% { border-color: rgba(241, 196, 15, 0.6); }
-        }
-
         @media (max-width: 520px) {
           .tab {
             padding: 10px 10px;
@@ -191,16 +212,8 @@ class PsNavBar extends HTMLElement {
           }
           .tab-icon { font-size: 1rem; }
           .tab-label { font-size: 0.62rem; }
-          .offline-banner { font-size: 0.72rem; padding: 6px 10px; }
         }
       </style>
-      <div class="offline-banner" style="display:${this._offline ? "flex" : "none"}">
-        <span class="offline-icon">⚡</span>
-        <span>
-          <span class="offline-text">Offline</span>
-          <span class="offline-sub"> — <span class="queue-count">${this._queueCount > 0 ? `${this._queueCount} change${this._queueCount !== 1 ? "s" : ""} queued, will sync when reconnected` : "changes saved locally, will sync when reconnected"}</span></span>
-        </span>
-      </div>
       <nav>
         ${tabs
           .map(
