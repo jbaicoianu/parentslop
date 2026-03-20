@@ -84,7 +84,15 @@ class PsDashboard extends HTMLElement {
         const pendingApprovals = trackerStore.completions.data.filter(
           (c) => c.userId === kid.id && c.status === "pending"
         );
-        return { ...kid, dailyDone, dailyTotal, activeJobs, balances, recentPenaltyCount, pendingText, pendingApprovals };
+        // Active timed tasks (clock-ins on timerBonus tasks, not jobs)
+        const activeTimedTasks = (trackerStore.worklog?.data || [])
+          .filter((e) => e.userId === kid.id && !e.clockOut)
+          .map((e) => {
+            const task = trackerStore.tasks.data.find((t) => t.id === e.taskId);
+            return task?.timerBonus && task.category !== "jobboard" ? { name: task.name, taskId: task.id, paused: !!e.pausedAt } : null;
+          })
+          .filter(Boolean);
+        return { ...kid, dailyDone, dailyTotal, activeJobs, activeTimedTasks, balances, recentPenaltyCount, pendingText, pendingApprovals };
       });
     }
 
@@ -656,6 +664,33 @@ class PsDashboard extends HTMLElement {
         }
         .task-row:hover {
           border-color: var(--accent-soft);
+        }
+        .task-row.in-progress {
+          border-color: rgba(102, 217, 239, 0.25);
+          box-shadow: 0 0 12px rgba(102, 217, 239, 0.08);
+        }
+        .in-progress-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 0.68rem;
+          color: var(--accent, #66d9ef);
+          background: rgba(102, 217, 239, 0.08);
+          padding: 2px 8px;
+          border-radius: 999px;
+          margin-left: 6px;
+          white-space: nowrap;
+        }
+        .pulsing-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: var(--accent, #66d9ef);
+          animation: dotPulse 1.5s ease-in-out infinite;
+        }
+        @keyframes dotPulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.4; transform: scale(0.7); }
         }
         .task-name {
           flex: 1;
@@ -1397,6 +1432,11 @@ class PsDashboard extends HTMLElement {
                         &#x1F4BC; ${j.name}${j.clockedIn ? ` <span class="clocked-in-badge">(clocked in)</span>` : ""}
                       </div>
                     `).join("")}
+                    ${kid.activeTimedTasks.map((t) => `
+                      <div class="kid-job">
+                        &#x23F1; ${t.name} <span class="clocked-in-badge">(in progress${t.paused ? " - paused" : ""})</span>
+                      </div>
+                    `).join("")}
                     <div class="kid-balances">
                       ${kid.balances.map((b) => `<span>${b.formatted}</span>`).join(" · ")}
                     </div>
@@ -1536,15 +1576,20 @@ class PsDashboard extends HTMLElement {
           </div>
           ${routineTasks.map((t) => {
             const streak = tracker.calcStreak(t.id, user.id);
+            const activeClockIns = (trackerStore.worklog?.data || []).filter((e) => e.taskId === t.id && !e.clockOut);
+            const myClockIn = activeClockIns.find((e) => e.userId === user.id);
+            const otherClockIns = activeClockIns.filter((e) => e.userId !== user.id);
+            const isInProgress = activeClockIns.length > 0;
             return `
-              <div class="task-row" data-task-id="${t.id}">
+              <div class="task-row${isInProgress ? " in-progress" : ""}" data-task-id="${t.id}">
                 <div class="task-name">
                   ${t.name}
                   ${t.timerBonus ? `<span class="has-timer">&#x23F1;</span>` : ""}
                   ${streak > 0 ? (() => { const st = streakTier(streak); return `<span class="streak-inline"><span class="streak-inline-dot" style="background:${st.color}"></span>${streak} ${t.recurrence === "weekly" ? (streak === 1 ? "week" : "weeks") : (streak === 1 ? "day" : "days")}${t.streakBonus && streak >= t.streakBonus.threshold ? " " + t.streakBonus.multiplier + "x" : ""}</span>`; })() : ""}
+                  ${otherClockIns.map((e) => { const u = trackerStore.users.data.find((u) => u.id === e.userId); return `<span class="in-progress-badge"><span class="pulsing-dot"></span>${u?.name || "?"} in progress</span>`; }).join("")}
                 </div>
                 <span class="task-reward">${rewardSummary(t)}</span>
-                <button class="complete-btn" data-task-id="${t.id}">${t.timerBonus ? "Start" : "Done"}</button>
+                <button class="complete-btn" data-task-id="${t.id}">${myClockIn ? "Resume" : (t.timerBonus ? "Start" : "Done")}</button>
               </div>
             `;
           }).join("")}

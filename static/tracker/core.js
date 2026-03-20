@@ -239,6 +239,8 @@ function _buildOptimisticWorklogEntry(taskId, userId, clientId) {
     userId,
     clockIn: new Date().toISOString(),
     clockOut: null,
+    pausedAt: null,
+    elapsedBeforePause: 0,
   };
 }
 
@@ -917,6 +919,55 @@ async function clockOut(taskId, userId) {
     }
     bus.emit("worklog:changed", _state.worklog[idx]);
     bus.emit("offlineQueue:changed");
+    _cacheState();
+    return _state.worklog[idx];
+  }
+}
+
+async function pauseTimer(taskId, userId) {
+  const open = _state.worklog.find((e) => e.taskId === taskId && e.userId === userId && e.clockOut === null);
+  if (!open || open.pausedAt) return null;
+
+  try {
+    const entry = await apiFetch(`/api/worklog/${open.id}/pause`, { method: "PATCH" });
+    const idx = _state.worklog.findIndex((e) => e.id === open.id);
+    if (idx >= 0) _state.worklog[idx] = entry;
+    bus.emit("worklog:changed", entry);
+    return entry;
+  } catch (e) {
+    if (!_isOfflineError(e)) throw e;
+    // Offline — apply optimistic pause
+    const now = new Date().toISOString();
+    const elapsed = (open.elapsedBeforePause || 0) + (new Date(now) - new Date(open.clockIn)) / 1000;
+    const idx = _state.worklog.findIndex((e) => e.id === open.id);
+    if (idx >= 0) {
+      _state.worklog[idx] = { ..._state.worklog[idx], pausedAt: now, elapsedBeforePause: elapsed, _offline: true };
+    }
+    bus.emit("worklog:changed", _state.worklog[idx]);
+    _cacheState();
+    return _state.worklog[idx];
+  }
+}
+
+async function resumeTimer(taskId, userId) {
+  const open = _state.worklog.find((e) => e.taskId === taskId && e.userId === userId && e.clockOut === null);
+  if (!open || !open.pausedAt) return null;
+
+  try {
+    const entry = await apiFetch(`/api/worklog/${open.id}/resume`, { method: "PATCH" });
+    const idx = _state.worklog.findIndex((e) => e.id === open.id);
+    if (idx >= 0) _state.worklog[idx] = entry;
+    bus.emit("worklog:changed", entry);
+    return entry;
+  } catch (e) {
+    if (!_isOfflineError(e)) throw e;
+    // Offline — apply optimistic resume
+    const now = new Date().toISOString();
+    const idx = _state.worklog.findIndex((e) => e.id === open.id);
+    if (idx >= 0) {
+      _state.worklog[idx] = { ..._state.worklog[idx], clockIn: now, pausedAt: null, _offline: true };
+    }
+    bus.emit("worklog:changed", _state.worklog[idx]);
     _cacheState();
     return _state.worklog[idx];
   }
@@ -1953,6 +2004,8 @@ window.tracker = {
   getJobClaim,
   clockIn,
   clockOut,
+  pauseTimer,
+  resumeTimer,
   getActiveClockIn,
   getWorklog,
   getTotalSeconds,

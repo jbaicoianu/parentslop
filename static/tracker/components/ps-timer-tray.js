@@ -14,6 +14,7 @@ class PsTimerTray extends HTMLElement {
   connectedCallback() {
     this._unsubs.push(
       eventBus.on("timer:start", (data) => this._begin(data.taskId, data.userId)),
+      eventBus.on("worklog:changed", () => this._syncRemoteTimers()),
     );
     this._render();
 
@@ -24,6 +25,9 @@ class PsTimerTray extends HTMLElement {
       }
     };
     document.addEventListener("visibilitychange", this._onVisibility);
+
+    // Stale cleanup: clock out orphaned entries for current user
+    this._cleanupStaleTimers();
   }
 
   disconnectedCallback() {
@@ -56,7 +60,7 @@ class PsTimerTray extends HTMLElement {
 
   // --- Timer lifecycle ---
 
-  _begin(taskId, userId) {
+  async _begin(taskId, userId) {
     const task = trackerStore.tasks.data.find((t) => t.id === taskId);
     if (!task || !task.timerBonus) return;
 
@@ -90,6 +94,8 @@ class PsTimerTray extends HTMLElement {
       pausedElapsed: 0,
       pauseCount: 0,
       pauseCooldownUntil: 0,
+      remote: false,
+      worklogId: null,
     });
 
     this._focusedKey = key;
@@ -99,6 +105,15 @@ class PsTimerTray extends HTMLElement {
     // Start rAF loop if not already running
     if (!this._rafId) {
       this._rafId = requestAnimationFrame(() => this._tick());
+    }
+
+    // Clock in to worklog for cross-device sync
+    try {
+      const entry = await tracker.clockIn(taskId, userId);
+      const timer = this._timers.get(key);
+      if (timer && entry) timer.worklogId = entry.id;
+    } catch (e) {
+      // Non-fatal — timer still works locally
     }
   }
 
@@ -111,6 +126,9 @@ class PsTimerTray extends HTMLElement {
     timer.pausedElapsed = timer.elapsed;
     timer.pauseCount++;
     this._render();
+
+    // Sync pause to server
+    tracker.pauseTimer(timer.taskId, timer.userId).catch(() => {});
   }
 
   _resume(key) {
@@ -123,13 +141,20 @@ class PsTimerTray extends HTMLElement {
     timer.pausedAt = null;
     timer.pauseCooldownUntil = performance.now() + 30000;
     this._render();
+
+    // Sync resume to server
+    tracker.resumeTimer(timer.taskId, timer.userId).catch(() => {});
   }
 
   _cancel(key) {
+    const timer = this._timers.get(key);
     this._timers.delete(key);
     if (this._focusedKey === key) this._focusedKey = null;
     this._checkEmpty();
     this._render();
+
+    // Clock out on server (fire-and-forget)
+    if (timer) tracker.clockOut(timer.taskId, timer.userId).catch(() => {});
   }
 
   async _complete(key) {
@@ -164,6 +189,9 @@ class PsTimerTray extends HTMLElement {
         type: bonusApplied ? "success" : "warning",
       });
     }
+
+    // Clock out on server
+    tracker.clockOut(timer.taskId, timer.userId).catch(() => {});
 
     const delay = result && result.timerMultiplier > 1 ? 600 : 0;
     setTimeout(() => {
@@ -425,6 +453,128 @@ class PsTimerTray extends HTMLElement {
     }
   }
 
+  // --- Remote timer sync ---
+
+  _syncRemoteTimers() {
+    const worklog = trackerStore.worklog?.data || [];
+    const tasks = trackerStore.tasks?.data || [];
+    const users = trackerStore.users?.data || [];
+    const currentUser = tracker.getCurrentUser();
+    const currentUserId = currentUser?.id;
+
+    // Find all open worklog entries on timed tasks
+    const openEntries = worklog.filter((e) => {
+      if (e.clockOut) return false;
+      const task = tasks.find((t) => t.id === e.taskId);
+      return task && task.timerBonus;
+    });
+
+    const activeKeys = new Set();
+
+    for (const entry of openEntries) {
+      const key = `${entry.taskId}:${entry.userId}`;
+      activeKeys.add(key);
+
+      const existing = this._timers.get(key);
+      const task = tasks.find((t) => t.id === entry.taskId);
+      const user = users.find((u) => u.id === entry.userId);
+
+      // Compute elapsed from worklog entry
+      let elapsed;
+      if (entry.pausedAt) {
+        elapsed = entry.elapsedBeforePause || 0;
+      } else {
+        elapsed = (entry.elapsedBeforePause || 0) + (Date.now() - new Date(entry.clockIn).getTime()) / 1000;
+      }
+
+      if (existing && !existing.remote && entry.userId === currentUserId) {
+        // Local timer owned by current user — sync pause/resume state from server
+        // (another device may have paused/resumed it)
+        const serverPaused = !!entry.pausedAt;
+        if (serverPaused && !existing.paused) {
+          existing.paused = true;
+          existing.pausedAt = performance.now();
+          existing.pausedElapsed = elapsed;
+        } else if (!serverPaused && existing.paused) {
+          existing.startTime = performance.now() - elapsed * 1000;
+          existing.paused = false;
+          existing.pausedAt = null;
+        }
+        existing.worklogId = entry.id;
+      } else if (existing) {
+        // Update existing remote timer state from server
+        existing.paused = !!entry.pausedAt;
+        existing.pausedElapsed = entry.pausedAt ? elapsed : existing.pausedElapsed;
+        if (!entry.pausedAt) {
+          existing.startTime = performance.now() - elapsed * 1000;
+        }
+        existing.worklogId = entry.id;
+      } else {
+        // Create new remote timer
+        this._timers.set(key, {
+          taskId: entry.taskId,
+          userId: entry.userId,
+          userName: user ? user.name : "?",
+          taskName: task.name,
+          targetSeconds: task.timerBonus.targetSeconds,
+          timerMode: task.timerBonus.mode || "under",
+          tickSound: task.timerBonus.tickSound || "click",
+          hitSound: task.timerBonus.hitSound || "success",
+          animation: task.timerBonus.animation || "none",
+          startTime: performance.now() - elapsed * 1000,
+          elapsed,
+          targetHitPlayed: false,
+          lastTickKey: -1,
+          paused: !!entry.pausedAt,
+          pausedAt: entry.pausedAt ? performance.now() : null,
+          pausedElapsed: elapsed,
+          pauseCount: 0,
+          pauseCooldownUntil: 0,
+          remote: true,
+          worklogId: entry.id,
+        });
+      }
+    }
+
+    // Remove timers whose worklog entry is now closed (completed/cancelled on another device)
+    for (const [key, timer] of this._timers) {
+      if (!activeKeys.has(key) && timer.worklogId) {
+        this._timers.delete(key);
+        if (this._focusedKey === key) this._focusedKey = null;
+      }
+    }
+
+    // Start rAF if we now have timers
+    if (this._timers.size > 0 && !this._rafId) {
+      this._rafId = requestAnimationFrame(() => this._tick());
+      this._acquireWakeLock();
+    }
+
+    this._checkEmpty();
+    this._render();
+  }
+
+  _cleanupStaleTimers() {
+    const currentUser = tracker.getCurrentUser();
+    if (!currentUser) return;
+    const worklog = trackerStore.worklog?.data || [];
+    const tasks = trackerStore.tasks?.data || [];
+
+    // Find open worklog entries for current user on timed tasks
+    for (const entry of worklog) {
+      if (entry.clockOut) continue;
+      if (entry.userId !== currentUser.id) continue;
+      const task = tasks.find((t) => t.id === entry.taskId);
+      if (!task || !task.timerBonus) continue;
+
+      const key = `${entry.taskId}:${entry.userId}`;
+      // If we don't have a local timer for this, it's orphaned — clock it out
+      if (!this._timers.has(key)) {
+        tracker.clockOut(entry.taskId, entry.userId).catch(() => {});
+      }
+    }
+  }
+
   // --- Full render (structural changes only) ---
 
   _render() {
@@ -449,7 +599,7 @@ class PsTimerTray extends HTMLElement {
       const timeStr = this._formatTime(elapsed);
       const shortName = timer.taskName.length > 14 ? timer.taskName.slice(0, 12) + "..." : timer.taskName;
       return `
-        <button class="pill${timer.paused ? " paused" : ""}${key === this._focusedKey ? " focused" : ""}"
+        <button class="pill${timer.paused ? " paused" : ""}${key === this._focusedKey ? " focused" : ""}${timer.remote ? " remote" : ""}"
                 id="pill-${key}" data-key="${key}" type="button">
           <span class="pill-avatar">${initial}</span>
           ${timer.paused ? '<span class="pill-pause-icon">&#x23F8;</span>' : ""}
@@ -488,7 +638,7 @@ class PsTimerTray extends HTMLElement {
           <div class="timer-card" id="timer-card">
             <div class="card-glow" id="card-glow"></div>
             <div class="card-task-name">${timer.taskName}</div>
-            <div class="card-user-label">${timer.userName}</div>
+            <div class="card-user-label">${timer.remote ? `${timer.userName}'s timer` : timer.userName}</div>
 
             <div class="ring-container">
               <svg class="ring-svg" viewBox="0 0 180 180">
@@ -688,6 +838,15 @@ class PsTimerTray extends HTMLElement {
       .pill.paused {
         opacity: 0.6;
         border-color: rgba(255, 255, 255, 0.1);
+      }
+
+      .pill.remote {
+        border-color: rgba(189, 147, 249, 0.3);
+      }
+
+      .pill.remote .pill-avatar {
+        color: #bd93f9;
+        background: radial-gradient(circle at 30% 0%, rgba(255,255,255,0.12), rgba(189,147,249,0.25));
       }
 
       .pill-avatar {

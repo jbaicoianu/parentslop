@@ -329,6 +329,14 @@ function initDb() {
     )
   `);
 
+  // Migrate: add paused_at + elapsed_before_pause columns for timer sync
+  try { db.prepare("SELECT paused_at FROM worklog_entries LIMIT 1").get(); } catch {
+    db.exec("ALTER TABLE worklog_entries ADD COLUMN paused_at TEXT");
+  }
+  try { db.prepare("SELECT elapsed_before_pause FROM worklog_entries LIMIT 1").get(); } catch {
+    db.exec("ALTER TABLE worklog_entries ADD COLUMN elapsed_before_pause REAL DEFAULT 0");
+  }
+
   // Migrate: add _client_id columns for offline queue idempotency
   const clientIdTables = ['completions', 'redemptions', 'job_claims', 'worklog_entries'];
   for (const table of clientIdTables) {
@@ -985,6 +993,7 @@ function worklogRowToObj(row) {
   return {
     id: row.id, familyId: row.family_id, taskId: row.task_id, userId: row.user_id,
     clockIn: row.clock_in, clockOut: row.clock_out,
+    pausedAt: row.paused_at || null, elapsedBeforePause: row.elapsed_before_pause || 0,
   };
 }
 
@@ -1754,6 +1763,39 @@ app.patch("/api/worklog/:id/clock-out", requireFamilyAuth, (req, res) => {
 
   const clockOut = new Date().toISOString();
   db.prepare("UPDATE worklog_entries SET clock_out = ? WHERE id = ?").run(clockOut, req.params.id);
+
+  const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(req.params.id);
+  const obj = worklogRowToObj(row);
+  broadcastSSE(req.familyId, "worklog:changed", obj);
+  res.json(obj);
+});
+
+app.patch("/api/worklog/:id/pause", requireFamilyAuth, (req, res) => {
+  const entry = db.prepare("SELECT * FROM worklog_entries WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
+  if (!entry) return res.status(404).json({ error: "not found" });
+  if (entry.clock_out) return res.status(400).json({ error: "already clocked out" });
+  if (entry.paused_at) return res.status(400).json({ error: "already paused" });
+
+  const now = new Date();
+  const elapsed = (entry.elapsed_before_pause || 0) + (now - new Date(entry.clock_in)) / 1000;
+  db.prepare("UPDATE worklog_entries SET paused_at = ?, elapsed_before_pause = ? WHERE id = ?")
+    .run(now.toISOString(), elapsed, req.params.id);
+
+  const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(req.params.id);
+  const obj = worklogRowToObj(row);
+  broadcastSSE(req.familyId, "worklog:changed", obj);
+  res.json(obj);
+});
+
+app.patch("/api/worklog/:id/resume", requireFamilyAuth, (req, res) => {
+  const entry = db.prepare("SELECT * FROM worklog_entries WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
+  if (!entry) return res.status(404).json({ error: "not found" });
+  if (entry.clock_out) return res.status(400).json({ error: "already clocked out" });
+  if (!entry.paused_at) return res.status(400).json({ error: "not paused" });
+
+  const now = new Date().toISOString();
+  db.prepare("UPDATE worklog_entries SET clock_in = ?, paused_at = NULL WHERE id = ?")
+    .run(now, req.params.id);
 
   const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(req.params.id);
   const obj = worklogRowToObj(row);
