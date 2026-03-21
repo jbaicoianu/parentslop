@@ -34,7 +34,9 @@ class PsTaskList extends HTMLElement {
       );
       return ever ? "done" : "open";
     }
-    return tracker.isTaskCompletedToday(task.id, userId) ? "done" : "open";
+    if (tracker.isTaskCompletedToday(task.id, userId)) return "done";
+    if (task.recurrence === "daily" && tracker.isTaskPastDeadline(task)) return "expired";
+    return "open";
   }
 
   render() {
@@ -71,6 +73,15 @@ class PsTaskList extends HTMLElement {
         }
         .task-card.done .task-name {
           text-decoration: line-through;
+        }
+        .task-card.expired {
+          opacity: 0.5;
+        }
+        .expired-label {
+          color: var(--danger, #ff5555);
+          font-size: 0.78rem;
+          font-weight: 600;
+          white-space: nowrap;
         }
         .task-info { flex: 1; min-width: 0; }
         .task-name {
@@ -148,7 +159,7 @@ class PsTaskList extends HTMLElement {
           const status = this._getStatus(t, user.id);
           const streak = tracker.calcStreak(t.id, user.id);
           return `
-            <div class="task-card ${status === "done" ? "done" : ""}">
+            <div class="task-card ${status === "done" ? "done" : ""}${status === "expired" ? " expired" : ""}">
               <div class="task-info">
                 <div class="task-name">
                   ${t.name}
@@ -164,6 +175,8 @@ class PsTaskList extends HTMLElement {
               </div>
               ${status === "done"
                 ? `<span class="badge badge-approved">Done</span>`
+                : status === "expired"
+                ? `<span class="expired-label">Expired</span>`
                 : `<button class="complete-btn" data-task-id="${t.id}">${t.timerBonus ? "⏱ Start" : "✓ Done"}</button>`
               }
             </div>

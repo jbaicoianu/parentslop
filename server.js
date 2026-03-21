@@ -329,12 +329,46 @@ function initDb() {
     )
   `);
 
+  // Helper: check if a table is already a CRR (has CRR triggers)
+  const isCrr = (table) => {
+    const trig = db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?").get(`${table}__crsql_itrig`);
+    return !!trig;
+  };
+
   // Migrate: add paused_at + elapsed_before_pause columns for timer sync
   try { db.prepare("SELECT paused_at FROM worklog_entries LIMIT 1").get(); } catch {
+    if (isCrr('worklog_entries')) db.exec("SELECT crsql_begin_alter('worklog_entries')");
     db.exec("ALTER TABLE worklog_entries ADD COLUMN paused_at TEXT");
-  }
-  try { db.prepare("SELECT elapsed_before_pause FROM worklog_entries LIMIT 1").get(); } catch {
     db.exec("ALTER TABLE worklog_entries ADD COLUMN elapsed_before_pause REAL DEFAULT 0");
+    if (isCrr('worklog_entries')) db.exec("SELECT crsql_commit_alter('worklog_entries')");
+  }
+
+  // Migrate: add deadline column for daily task deadlines
+  try { db.prepare("SELECT deadline FROM tasks LIMIT 1").get(); } catch {
+    if (isCrr('tasks')) db.exec("SELECT crsql_begin_alter('tasks')");
+    db.exec("ALTER TABLE tasks ADD COLUMN deadline TEXT DEFAULT ''");
+    if (isCrr('tasks')) db.exec("SELECT crsql_commit_alter('tasks')");
+  }
+
+  // Repair stale CRR triggers: if a column was added without crsql_begin_alter/commit_alter,
+  // the update trigger references the old column list. Detect and fix by comparing trigger
+  // column count to actual table column count.
+  {
+    const crrRepairTables = ['worklog_entries', 'tasks'];
+    for (const table of crrRepairTables) {
+      const utrig = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(`${table}__crsql_utrig`);
+      if (!utrig) continue;
+      const actualCols = db.pragma(`table_info(${table})`).length;
+      // The update trigger references each non-PK column twice (NEW + OLD).
+      // Count NEW."col" references to determine how many columns the trigger knows about.
+      const newRefs = (utrig.sql.match(/NEW\."[^"]+"/g) || []).length;
+      // newRefs includes NEW."id" (the PK), so trigger knows (newRefs) columns total
+      if (newRefs < actualCols) {
+        console.log(`Repairing stale CRR triggers for ${table} (trigger has ${newRefs} cols, table has ${actualCols})`);
+        db.exec(`SELECT crsql_begin_alter('${table}')`);
+        db.exec(`SELECT crsql_commit_alter('${table}')`);
+      }
+    }
   }
 
   // Migrate: add _client_id columns for offline queue idempotency
@@ -933,6 +967,7 @@ function taskRowToObj(row) {
     activeDays: jsonOrDefault(row.active_days, []), multiUser: !!row.multi_user,
     maxPayout: jsonOrDefault(row.max_payout, null), isPenalty: !!row.is_penalty,
     requiresApproval: !!row.requires_approval, lastActivatedAt: row.last_activated_at,
+    deadline: row.deadline || null,
     archived: !!row.archived, createdAt: row.created_at,
   };
 }
@@ -1155,8 +1190,8 @@ app.post("/api/tasks", requireFamilyAuth, requireAdmin, (req, res) => {
   const t = req.body;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  db.prepare(`INSERT INTO tasks (id, family_id, name, description, recurrence, available, category, pay_type, rewards, streak_bonus, timer_bonus, bonus_criteria, assigned_users, required_tags, active_days, multi_user, max_payout, is_penalty, requires_approval, last_activated_at, archived, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  db.prepare(`INSERT INTO tasks (id, family_id, name, description, recurrence, available, category, pay_type, rewards, streak_bonus, timer_bonus, bonus_criteria, assigned_users, required_tags, active_days, multi_user, max_payout, is_penalty, requires_approval, last_activated_at, deadline, archived, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(id, req.familyId, t.name || '', t.description || '', t.recurrence || 'daily',
     (t.available ?? (t.recurrence === 'transient' ? false : true)) ? 1 : 0,
     t.category || (t.recurrence === 'transient' ? 'jobboard' : 'routine'), t.payType || 'fixed',
@@ -1165,7 +1200,7 @@ app.post("/api/tasks", requireFamilyAuth, requireAdmin, (req, res) => {
     JSON.stringify(t.assignedUsers || []), JSON.stringify(t.requiredTags || []),
     JSON.stringify(t.activeDays || []), (t.multiUser ?? true) ? 1 : 0,
     t.maxPayout ? JSON.stringify(t.maxPayout) : null, t.isPenalty ? 1 : 0,
-    t.requiresApproval ? 1 : 0, t.lastActivatedAt || null, 0, now);
+    t.requiresApproval ? 1 : 0, t.lastActivatedAt || null, t.deadline || '', 0, now);
 
   const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
   const obj = taskRowToObj(row);
@@ -1178,7 +1213,7 @@ app.put("/api/tasks/:id", requireFamilyAuth, requireAdmin, (req, res) => {
   const existing = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!existing) return res.status(404).json({ error: "not found" });
 
-  db.prepare(`UPDATE tasks SET name = ?, description = ?, recurrence = ?, available = ?, category = ?, pay_type = ?, rewards = ?, streak_bonus = ?, timer_bonus = ?, bonus_criteria = ?, assigned_users = ?, required_tags = ?, active_days = ?, multi_user = ?, max_payout = ?, is_penalty = ?, requires_approval = ?, last_activated_at = ?, archived = ? WHERE id = ? AND family_id = ?`
+  db.prepare(`UPDATE tasks SET name = ?, description = ?, recurrence = ?, available = ?, category = ?, pay_type = ?, rewards = ?, streak_bonus = ?, timer_bonus = ?, bonus_criteria = ?, assigned_users = ?, required_tags = ?, active_days = ?, multi_user = ?, max_payout = ?, is_penalty = ?, requires_approval = ?, last_activated_at = ?, deadline = ?, archived = ? WHERE id = ? AND family_id = ?`
   ).run(t.name ?? existing.name, t.description ?? existing.description, t.recurrence ?? existing.recurrence,
     (t.available !== undefined ? t.available : existing.available) ? 1 : 0,
     t.category ?? existing.category, t.payType ?? existing.pay_type,
@@ -1194,6 +1229,7 @@ app.put("/api/tasks/:id", requireFamilyAuth, requireAdmin, (req, res) => {
     (t.isPenalty !== undefined ? t.isPenalty : existing.is_penalty) ? 1 : 0,
     (t.requiresApproval !== undefined ? t.requiresApproval : existing.requires_approval) ? 1 : 0,
     t.lastActivatedAt !== undefined ? t.lastActivatedAt : existing.last_activated_at,
+    t.deadline !== undefined ? (t.deadline || '') : existing.deadline,
     (t.archived !== undefined ? t.archived : existing.archived) ? 1 : 0,
     req.params.id, req.familyId);
 
@@ -1375,6 +1411,22 @@ app.post("/api/completions", requireFamilyAuth, (req, res) => {
 
   const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(taskId, req.familyId);
   if (!task) return res.status(404).json({ error: "task not found" });
+
+  // Reject if daily task is past its deadline (using client's local time via offset header)
+  if (task.deadline && task.recurrence === 'daily') {
+    const offsetMin = parseInt(req.headers['x-timezone-offset'], 10);
+    // Client sends getTimezoneOffset() which is (UTC - local) in minutes.
+    // Convert server UTC to client local: local = UTC - offset
+    const utcNow = Date.now();
+    const clientMs = isNaN(offsetMin) ? utcNow : utcNow - offsetMin * 60000;
+    const clientNow = new Date(clientMs);
+    const [dh, dm] = task.deadline.split(":").map(Number);
+    // Compare using UTC methods since clientNow is already shifted to represent local wall-clock as UTC
+    const deadlineMs = Date.UTC(clientNow.getUTCFullYear(), clientNow.getUTCMonth(), clientNow.getUTCDate(), dh, dm);
+    if (clientMs > deadlineMs) {
+      return res.status(400).json({ error: "task deadline has passed" });
+    }
+  }
 
   const streak = calcStreakServer(req.familyId, taskId, userId);
   const newStreak = streak + 1;

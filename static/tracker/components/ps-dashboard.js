@@ -6,6 +6,7 @@ class PsDashboard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._unsubs = [];
     this._timerInterval = null;
+    this._deadlineTimeout = null;
     this._openMenuId = null;
     this._penaltyPickerOpen = false;
     this._showAllEarnings = false;
@@ -33,10 +34,12 @@ class PsDashboard extends HTMLElement {
   disconnectedCallback() {
     this._unsubs.forEach((u) => u());
     if (this._timerInterval) { clearInterval(this._timerInterval); this._timerInterval = null; }
+    if (this._deadlineTimeout) { clearTimeout(this._deadlineTimeout); this._deadlineTimeout = null; }
   }
 
   render() {
     if (this._timerInterval) { clearInterval(this._timerInterval); this._timerInterval = null; }
+    if (this._deadlineTimeout) { clearTimeout(this._deadlineTimeout); this._deadlineTimeout = null; }
 
     const user = tracker.getCurrentUser();
     if (!user) return;
@@ -172,13 +175,19 @@ class PsDashboard extends HTMLElement {
           (c) => c.taskId === t.id && c.userId === user.id && c.status !== "rejected"
         );
 
+      // Check if daily task is past its deadline
+      const isExpired = !isDone && !everDone && t.recurrence === "daily" && tracker.isTaskPastDeadline(t);
+
       const isJobboard = t.category === "jobboard";
       if (isDone || everDone) {
         if (isJobboard) jobboardDone.push(t);
         else routineDone.push(t);
       } else {
         if (isJobboard) allJobboardTasks.push(t);
-        else routineTasks.push(t);
+        else {
+          const entry = isExpired ? Object.assign({}, t, { _expired: true }) : t;
+          routineTasks.push(entry);
+        }
       }
     }
 
@@ -306,6 +315,14 @@ class PsDashboard extends HTMLElement {
       const base = rewardSummary(t);
       if (!base) return "No reward";
       return t.payType === "hourly" ? base + "/hr" : base;
+    };
+
+    // Format "HH:MM" to "H:MM AM/PM"
+    const formatDeadline = (time) => {
+      const [h, m] = time.split(":").map(Number);
+      const ampm = h >= 12 ? "PM" : "AM";
+      const h12 = h % 12 || 12;
+      return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
     };
 
     // Format seconds to human readable
@@ -668,6 +685,27 @@ class PsDashboard extends HTMLElement {
         .task-row.in-progress {
           border-color: rgba(102, 217, 239, 0.25);
           box-shadow: 0 0 12px rgba(102, 217, 239, 0.08);
+        }
+        .task-row.expired {
+          opacity: 0.5;
+        }
+        .expired-label {
+          color: var(--danger, #ff5555);
+          font-size: 0.78rem;
+          font-weight: 600;
+          white-space: nowrap;
+        }
+        .deadline-tag {
+          font-size: 0.65rem;
+          color: var(--muted);
+          background: rgba(255,255,255,0.04);
+          padding: 2px 6px;
+          border-radius: 999px;
+          margin-left: 4px;
+        }
+        .deadline-tag.past {
+          color: var(--danger, #ff5555);
+          background: rgba(255, 85, 85, 0.1);
         }
         .in-progress-badge {
           display: inline-flex;
@@ -1580,16 +1618,21 @@ class PsDashboard extends HTMLElement {
             const myClockIn = activeClockIns.find((e) => e.userId === user.id);
             const otherClockIns = activeClockIns.filter((e) => e.userId !== user.id);
             const isInProgress = activeClockIns.length > 0;
+            const expired = t._expired;
             return `
-              <div class="task-row${isInProgress ? " in-progress" : ""}" data-task-id="${t.id}">
+              <div class="task-row${isInProgress ? " in-progress" : ""}${expired ? " expired" : ""}" data-task-id="${t.id}">
                 <div class="task-name">
                   ${t.name}
                   ${t.timerBonus ? `<span class="has-timer">&#x23F1;</span>` : ""}
+                  ${t.deadline ? `<span class="deadline-tag${expired ? " past" : ""}">by ${formatDeadline(t.deadline)}</span>` : ""}
                   ${streak > 0 ? (() => { const st = streakTier(streak); return `<span class="streak-inline"><span class="streak-inline-dot" style="background:${st.color}"></span>${streak} ${t.recurrence === "weekly" ? (streak === 1 ? "week" : "weeks") : (streak === 1 ? "day" : "days")}${t.streakBonus && streak >= t.streakBonus.threshold ? " " + t.streakBonus.multiplier + "x" : ""}</span>`; })() : ""}
                   ${otherClockIns.map((e) => { const u = trackerStore.users.data.find((u) => u.id === e.userId); return `<span class="in-progress-badge"><span class="pulsing-dot"></span>${u?.name || "?"} in progress</span>`; }).join("")}
                 </div>
                 <span class="task-reward">${rewardSummary(t)}</span>
-                <button class="complete-btn" data-task-id="${t.id}">${myClockIn ? "Resume" : (t.timerBonus ? "Start" : "Done")}</button>
+                ${expired
+                  ? `<span class="expired-label">Expired</span>`
+                  : `<button class="complete-btn" data-task-id="${t.id}">${myClockIn ? "Resume" : (t.timerBonus ? "Start" : "Done")}</button>`
+                }
               </div>
             `;
           }).join("")}
@@ -1965,6 +2008,21 @@ class PsDashboard extends HTMLElement {
 
         checkboxes.forEach((cb) => cb.addEventListener("change", updatePayout));
       });
+    }
+
+    // --- Schedule re-render when next deadline passes ---
+    const now = new Date();
+    let nextDeadlineMs = Infinity;
+    for (const t of routineTasks) {
+      if (t.deadline && !t._expired) {
+        const [dh, dm] = t.deadline.split(":").map(Number);
+        const deadlineTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), dh, dm);
+        const ms = deadlineTime.getTime() - now.getTime();
+        if (ms > 0 && ms < nextDeadlineMs) nextDeadlineMs = ms;
+      }
+    }
+    if (nextDeadlineMs < Infinity) {
+      this._deadlineTimeout = setTimeout(() => this.render(), nextDeadlineMs + 500);
     }
   }
 

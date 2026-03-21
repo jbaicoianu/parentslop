@@ -209,6 +209,7 @@ class PsAdminTasks extends HTMLElement {
     const timerAnimation = task?.timerBonus?.animation || "none";
     const bonusCriteria = task?.bonusCriteria || [];
     const activeDays = task?.activeDays || [];
+    const deadline = task?.deadline || "";
     const assignedUsers = task?.assignedUsers || [];
     const requiredTags = task?.requiredTags || [];
     const category = task?.category || "routine";
@@ -374,6 +375,17 @@ class PsAdminTasks extends HTMLElement {
                   `<button type="button" class="day-toggle${activeDays.length === 0 || activeDays.includes(i) ? " active" : ""}" data-day="${i}">${label}</button>`
                 ).join("")}
               </div>
+            </div>
+          </div>
+
+          <div id="deadline-row" style="${recurrence === "daily" ? "" : "display:none"}">
+            <div class="form-group">
+              <label>Daily Deadline</label>
+              <div style="display:flex;align-items:center;gap:8px">
+                <input type="time" id="f-deadline" value="${deadline}" style="flex:1;padding:8px;border-radius:var(--radius-md);border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);color:var(--text);font-family:inherit" />
+                ${deadline ? `<button type="button" id="deadline-clear" style="appearance:none;border:none;background:rgba(255,85,85,0.15);color:var(--danger);border-radius:var(--radius-md);padding:6px 12px;cursor:pointer;font-size:0.75rem;font-family:inherit">Clear</button>` : ""}
+              </div>
+              <div style="font-size:0.7rem;color:var(--muted);margin-top:4px">Task expires after this time each day</div>
             </div>
           </div>
 
@@ -559,12 +571,15 @@ class PsAdminTasks extends HTMLElement {
 
     const hourlyOpts = this.shadowRoot.getElementById("hourly-options");
 
-    // Toggle active days visibility when recurrence changes
+    // Toggle active days / deadline visibility when recurrence changes
     const recurrenceEl = this.shadowRoot.getElementById("f-recurrence");
     const activeDaysRow = this.shadowRoot.getElementById("active-days-row");
+    const deadlineRow = this.shadowRoot.getElementById("deadline-row");
     if (recurrenceEl && activeDaysRow) {
       recurrenceEl.addEventListener("change", () => {
-        activeDaysRow.style.display = recurrenceEl.value === "daily" ? "" : "none";
+        const isDaily = recurrenceEl.value === "daily";
+        activeDaysRow.style.display = isDaily ? "" : "none";
+        if (deadlineRow) deadlineRow.style.display = isDaily ? "" : "none";
         // Auto-switch category to jobboard when transient is selected
         if (recurrenceEl.value === "transient" && categoryEl) {
           categoryEl.value = "jobboard";
@@ -580,6 +595,16 @@ class PsAdminTasks extends HTMLElement {
         btn.classList.toggle("active");
       });
     });
+
+    // Deadline clear button
+    const deadlineClear = this.shadowRoot.getElementById("deadline-clear");
+    if (deadlineClear) {
+      deadlineClear.addEventListener("click", () => {
+        const inp = this.shadowRoot.getElementById("f-deadline");
+        if (inp) inp.value = "";
+        deadlineClear.remove();
+      });
+    }
 
     if (categoryEl && jobboardOpts) {
       categoryEl.addEventListener("change", () => {
@@ -652,8 +677,12 @@ class PsAdminTasks extends HTMLElement {
           checked.push(parseInt(btn.dataset.day));
         });
         data.activeDays = (checked.length === 7 || checked.length === 0) ? [] : checked.sort();
+        // Deadline (only meaningful for daily)
+        const deadlineVal = s.getElementById("f-deadline")?.value || "";
+        data.deadline = deadlineVal || null;
       } else {
         data.activeDays = [];
+        data.deadline = null;
       }
 
       data.category = data.recurrence === "transient" ? "jobboard" : s.getElementById("f-category").value;

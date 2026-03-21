@@ -148,7 +148,7 @@ async function apiFetch(url, options = {}) {
   try {
     const res = await fetch(url, {
       ...options,
-      headers: { "Content-Type": "application/json", ...options.headers },
+      headers: { "Content-Type": "application/json", "X-Timezone-Offset": String(new Date().getTimezoneOffset()), ...options.headers },
     });
     if (res.status === 401) {
       bus.emit("auth:required");
@@ -805,6 +805,13 @@ function isTaskCompletedThisWeek(taskId, userId) {
 function isTaskScheduledToday(task) {
   if (!task.activeDays || task.activeDays.length === 0) return true;
   return task.activeDays.includes(new Date().getDay());
+}
+
+function isTaskPastDeadline(task) {
+  if (!task.deadline) return false;
+  const now = new Date();
+  const [h, m] = task.deadline.split(":").map(Number);
+  return now > new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m);
 }
 
 // --- Admin: reset a user's daily tasks for today ----------------------------
@@ -1994,6 +2001,7 @@ window.tracker = {
   isTaskCompletedThisWeek,
   isTaskCompletedSinceActivation,
   isTaskScheduledToday,
+  isTaskPastDeadline,
   activateTransientTask,
   deactivateTransientTask,
   resetDailyTasks,
