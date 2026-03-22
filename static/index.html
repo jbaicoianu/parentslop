@@ -926,6 +926,21 @@
         switchView(trackerStore.app.data.currentView || "dashboard");
       }
 
+      // ---- Hash-based routing ----
+      const VALID_VIEWS = ['dashboard', 'tasks', 'shop', 'history', 'games', 'admin'];
+
+      function parseHash() {
+        const hash = location.hash.replace(/^#/, '');
+        if (!hash) return { view: 'dashboard', adminTab: null };
+        if (hash.startsWith('admin/')) {
+          return { view: 'admin', adminTab: hash.slice(6) || 'tasks' };
+        }
+        if (VALID_VIEWS.includes(hash)) {
+          return { view: hash, adminTab: null };
+        }
+        return { view: 'dashboard', adminTab: null };
+      }
+
       // ---- Auth-first boot sequence ----
       async function boot() {
         try {
@@ -951,9 +966,9 @@
 
           const app = trackerStore.app.data;
 
-          // Sync current member to app store and reset view to dashboard
+          // Sync current member to app store; restore view from URL hash
           app.currentUserId = data.currentMember.id;
-          app.currentView = "dashboard";
+          app.currentView = parseHash().view;
           trackerStore.app.save();
 
           if (!app.setupComplete) {
@@ -977,6 +992,7 @@
             const app = trackerStore.app.data;
             if (app.setupComplete && app.currentUserId) {
               await tracker.initStores();
+              app.currentView = parseHash().view;
               showTracker();
               eventBus.emit("user:changed", { userId: app.currentUserId });
               return;
@@ -1009,6 +1025,7 @@
         const appData = trackerStore.app.data;
         appData.currentUserId = user.id;
         appData.currentView = "dashboard";
+        location.hash = "dashboard";
         trackerStore.app.save();
 
         showTracker();
@@ -1082,14 +1099,36 @@
         }
       }
 
+      function navigateTo(view, adminTab) {
+        if (view === 'admin' && adminTab) {
+          location.hash = 'admin/' + adminTab;
+        } else {
+          location.hash = view || 'dashboard';
+        }
+      }
+
+      window.addEventListener('hashchange', () => {
+        if (trackerApp.hidden) return;
+        const { view, adminTab } = parseHash();
+        const app = trackerStore.app.data;
+        app.currentView = view;
+        trackerStore.app.save();
+        switchView(view);
+        if (view === 'admin') {
+          switchAdminTab(adminTab || 'tasks');
+        }
+        eventBus.emit('nav:changed', { view });
+      });
+
       adminSubnav.querySelectorAll("button").forEach((btn) => {
         btn.addEventListener("click", () => {
-          switchAdminTab(btn.dataset.adminTab);
+          navigateTo("admin", btn.dataset.adminTab);
         });
       });
 
-      // Default admin tab
-      switchAdminTab("tasks");
+      // Apply initial admin sub-tab from hash (default to "tasks")
+      const { adminTab: initialAdminTab } = parseHash();
+      switchAdminTab(initialAdminTab || "tasks");
 
       // ---- Games tab ----
       const gamesGrid = document.getElementById("games-grid");

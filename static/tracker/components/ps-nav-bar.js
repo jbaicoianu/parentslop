@@ -231,11 +231,7 @@ class PsNavBar extends HTMLElement {
 
     this.shadowRoot.querySelectorAll(".tab").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const tab = btn.dataset.tab;
-        const app = trackerStore.app.data;
-        app.currentView = tab;
-        trackerStore.app.save();
-        eventBus.emit("nav:changed", { view: tab });
+        location.hash = btn.dataset.tab;
       });
     });
   }
