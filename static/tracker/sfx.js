@@ -135,6 +135,56 @@ class SlopSFX {
     this._tone(523.25, "triangle", t + 0.1, 0.12, 0.18); // C5
   }
 
+  // --- Stage / encouragement sounds ---
+
+  // Ascending chime — each step higher in the scale, with layered chords at later stages
+  stageChime(step = 0) {
+    const ctx = this._ensureCtx();
+    const t = ctx.currentTime;
+    // C major scale from C5 upward
+    const scale = [523.25, 587.33, 659.25, 783.99, 880.00, 987.77, 1046.50];
+    const base = scale[Math.min(step, scale.length - 1)];
+    this._tone(base, "sine", t, 0.1, 0.16);
+    this._tone(base * 1.25, "sine", t + 0.08, 0.14, 0.12); // major third
+    // Add more chord layers at higher steps
+    if (step >= 2) {
+      this._tone(base * 1.5, "triangle", t + 0.06, 0.12, 0.08); // fifth
+    }
+    if (step >= 4) {
+      this._tone(base * 2, "sine", t + 0.04, 0.1, 0.06); // octave shimmer
+    }
+  }
+
+  // Subtle warm rising tone, ~250ms, low gain — periodic encouragement
+  encourage() {
+    const ctx = this._ensureCtx();
+    const t = ctx.currentTime;
+    this._sweep(440, 660, "sine", t, 0.25, 0.07);
+  }
+
+  // Cheering party — rapid ascending fanfare, layered noise burst, triumphant chords
+  celebrate() {
+    const ctx = this._ensureCtx();
+    const t = ctx.currentTime;
+    // Rapid ascending fanfare
+    const fanfare = [523.25, 659.25, 783.99, 1046.50, 1318.51, 1567.98];
+    fanfare.forEach((f, i) => {
+      this._tone(f, "sine", t + i * 0.05, 0.12, 0.14);
+    });
+    // Triumphant major chord (C6, E6, G6) sustained
+    this._tone(1046.50, "triangle", t + 0.3, 0.4, 0.12);  // C6
+    this._tone(1318.51, "triangle", t + 0.32, 0.38, 0.1);  // E6
+    this._tone(1567.98, "triangle", t + 0.34, 0.36, 0.1);  // G6
+    this._tone(2093.00, "sine", t + 0.36, 0.35, 0.08);     // C7 sparkle
+    // Noise burst (cymbal-like cheer) via detuned oscillators
+    for (let i = 0; i < 5; i++) {
+      const freq = 3000 + Math.random() * 4000;
+      this._tone(freq, "triangle", t + 0.28 + Math.random() * 0.1, 0.08 + Math.random() * 0.1, 0.03);
+    }
+    // Final high shimmer
+    this._sweep(2093, 3000, "sine", t + 0.5, 0.3, 0.06);
+  }
+
   // --- Reward / penalty sounds ---
 
   // Submitted for approval: bright upward whoosh with a questioning resolve

@@ -1,5 +1,50 @@
 // ps-timer-tray: Non-modal multi-timer system
 // Manages concurrent timers as minimized pills + expandable card view
+
+const ANIMATION_SCRIPTS = {
+  "toothbrush-guided": {
+    baseAnimation: "toothbrush",
+    stages: [
+      { label: "Upper left",  fraction: 1/6, visualClass: "stage-upper-left",  sound: "stageChime" },
+      { label: "Upper front", fraction: 1/6, visualClass: "stage-upper-front", sound: "stageChime" },
+      { label: "Upper right", fraction: 1/6, visualClass: "stage-upper-right", sound: "stageChime" },
+      { label: "Lower left",  fraction: 1/6, visualClass: "stage-lower-left",  sound: "stageChime" },
+      { label: "Lower front", fraction: 1/6, visualClass: "stage-lower-front", sound: "stageChime" },
+      { label: "Lower right", fraction: 1/6, visualClass: "stage-lower-right", sound: "stageChime" },
+    ],
+  },
+  "exercise-guided": {
+    baseAnimation: "exercise",
+    encouragement: { intervalSeconds: 30, sound: "encourage" },
+    stages: [
+      { label: "Warm up",     fraction: 1/5, visualClass: "stage-warmup",   sound: "stageChime" },
+      { label: "Jumping jacks", fraction: 1/5, visualClass: "stage-jumping", sound: "stageChime" },
+      { label: "Stretches",   fraction: 1/5, visualClass: "stage-stretch",   sound: "stageChime" },
+      { label: "Squats",      fraction: 1/5, visualClass: "stage-squats",    sound: "stageChime" },
+      { label: "Cool down",   fraction: 1/5, visualClass: "stage-cooldown",  sound: "stageChime" },
+    ],
+  },
+  "reading-guided": {
+    baseAnimation: "reading",
+    encouragement: { intervalSeconds: 30, sound: "encourage" },
+    stages: [
+      { label: "Start reading", fraction: 1/3, visualClass: "stage-read-start", sound: "stageChime" },
+      { label: "Keep going",    fraction: 1/3, visualClass: "stage-read-mid",   sound: "stageChime" },
+      { label: "Almost done",   fraction: 1/3, visualClass: "stage-read-end",   sound: "stageChime" },
+    ],
+  },
+  "cleaning-guided": {
+    baseAnimation: "cleaning",
+    encouragement: { intervalSeconds: 30, sound: "encourage" },
+    stages: [
+      { label: "Pick up items",  fraction: 1/4, visualClass: "stage-pickup",  sound: "stageChime" },
+      { label: "Wipe surfaces",  fraction: 1/4, visualClass: "stage-wipe",    sound: "stageChime" },
+      { label: "Sweep / vacuum", fraction: 1/4, visualClass: "stage-sweep",   sound: "stageChime" },
+      { label: "Final check",    fraction: 1/4, visualClass: "stage-check",   sound: "stageChime" },
+    ],
+  },
+};
+
 class PsTimerTray extends HTMLElement {
   constructor() {
     super();
@@ -84,7 +129,7 @@ class PsTimerTray extends HTMLElement {
       timerMode: task.timerBonus.mode || "under",
       tickSound: task.timerBonus.tickSound || "click",
       hitSound: task.timerBonus.hitSound || "success",
-      animation: task.timerBonus.animation || "none",
+      animation: task.timerBonus.animationOverrides?.[userId] ?? (task.timerBonus.animation || "none"),
       startTime: performance.now(),
       elapsed: 0,
       targetHitPlayed: false,
@@ -96,6 +141,8 @@ class PsTimerTray extends HTMLElement {
       pauseCooldownUntil: 0,
       remote: false,
       worklogId: null,
+      _stageIndex: 0,
+      _lastEncourageKey: -1,
     });
 
     this._focusedKey = key;
@@ -213,6 +260,23 @@ class PsTimerTray extends HTMLElement {
     }
   }
 
+  // --- Animation script helpers ---
+
+  _getScript(animation) {
+    return ANIMATION_SCRIPTS[animation] || null;
+  }
+
+  _getStageIndex(elapsed, targetSeconds, script) {
+    if (!script) return 0;
+    const fraction = Math.min(elapsed / targetSeconds, 1);
+    let cumulative = 0;
+    for (let i = 0; i < script.stages.length; i++) {
+      cumulative += script.stages[i].fraction;
+      if (fraction < cumulative) return i;
+    }
+    return script.stages.length - 1;
+  }
+
   // --- rAF tick loop ---
 
   _tick() {
@@ -226,6 +290,37 @@ class PsTimerTray extends HTMLElement {
     for (const [key, timer] of this._timers) {
       if (timer.paused) continue;
       timer.elapsed = (now - timer.startTime) / 1000;
+
+      // Stage transitions and encouragement for guided animations
+      const script = this._getScript(timer.animation);
+      if (script) {
+        const newStage = this._getStageIndex(timer.elapsed, timer.targetSeconds, script);
+        if (newStage !== timer._stageIndex) {
+          const prevStage = timer._stageIndex;
+          timer._stageIndex = newStage;
+          const sfx = window.slopSFX;
+          if (sfx && script.stages[newStage].sound) {
+            sfx[script.stages[newStage].sound](newStage);
+          }
+          // Flash completed segment
+          const prevSeg = this.shadowRoot?.getElementById(`ring-seg-${prevStage}`);
+          if (prevSeg) {
+            prevSeg.classList.add("seg-flash");
+            setTimeout(() => prevSeg.classList.remove("seg-flash"), 600);
+          }
+        }
+
+        if (script.encouragement) {
+          const encourageKey = Math.floor(timer.elapsed / script.encouragement.intervalSeconds);
+          if (encourageKey > 0 && encourageKey !== timer._lastEncourageKey) {
+            timer._lastEncourageKey = encourageKey;
+            const sfx = window.slopSFX;
+            if (sfx && sfx[script.encouragement.sound]) {
+              sfx[script.encouragement.sound]();
+            }
+          }
+        }
+      }
     }
 
     // Audio: focused timer gets ticks, or most urgent if none focused
@@ -266,6 +361,9 @@ class PsTimerTray extends HTMLElement {
 
   _tickAudio(timer) {
     if (!timer || timer.paused || timer.tickSound === "none") return;
+
+    // Stop ticking once count-up timers reach their target
+    if (timer.timerMode === "over" && timer.elapsed >= timer.targetSeconds) return;
 
     const elapsed = timer.elapsed;
     const remaining = Math.max(0, timer.targetSeconds - elapsed);
@@ -315,6 +413,7 @@ class PsTimerTray extends HTMLElement {
       switch (timer.hitSound) {
         case "success": sfx.timerSuccess(); break;
         case "warning": sfx.timerWarning(); break;
+        case "celebrate": sfx.celebrate(); break;
       }
     }
   }
@@ -355,26 +454,26 @@ class PsTimerTray extends HTMLElement {
 
       if (timer.timerMode === "over") {
         display.textContent = this._formatTime(elapsed);
-        ring.style.strokeDashoffset = circumference * (1 - pct);
+        if (ring) ring.style.strokeDashoffset = circumference * (1 - pct);
 
         if (elapsed >= timer.targetSeconds) {
           display.className = "card-time target-hit";
-          ring.style.stroke = "var(--success)";
+          if (ring) ring.style.stroke = "var(--success)";
           statusEl.textContent = "Target reached! Bonus earned.";
           if (glow) glow.style.background = "radial-gradient(circle, rgba(80,250,123,0.12) 0%, transparent 70%)";
         } else {
           display.className = "card-time" + (isCritical ? " critical" : isUrgent ? " urgent" : "");
-          ring.style.stroke = isUrgent ? "var(--warning)" : "var(--accent)";
+          if (ring) ring.style.stroke = isUrgent ? "var(--warning)" : "var(--accent)";
           statusEl.textContent = `Keep going — ${this._formatTime(remaining)} to bonus`;
           if (glow) glow.style.background = "radial-gradient(circle, rgba(102,217,239,0.06) 0%, transparent 70%)";
         }
       } else {
-        ring.style.strokeDashoffset = circumference * pct;
+        if (ring) ring.style.strokeDashoffset = circumference * pct;
 
         if (remaining > 0) {
           display.textContent = this._formatTime(remaining);
           display.className = "card-time" + (isCritical ? " critical" : isUrgent ? " urgent" : "");
-          ring.style.stroke = isCritical ? "var(--danger)" : isUrgent ? "var(--warning)" : "var(--accent)";
+          if (ring) ring.style.stroke = isCritical ? "var(--danger)" : isUrgent ? "var(--warning)" : "var(--accent)";
           statusEl.textContent = `Finish before ${this._formatTime(timer.targetSeconds)}`;
           if (glow) {
             const glowColor = isCritical ? "rgba(255,107,129,0.1)" : isUrgent ? "rgba(241,250,140,0.08)" : "rgba(102,217,239,0.06)";
@@ -383,13 +482,51 @@ class PsTimerTray extends HTMLElement {
         } else {
           display.textContent = "+" + this._formatTime(elapsed - timer.targetSeconds);
           display.className = "card-time target-hit over";
-          ring.style.stroke = "var(--danger)";
+          if (ring) ring.style.stroke = "var(--danger)";
           statusEl.textContent = "Over target! Bonus lost.";
           if (glow) glow.style.background = "radial-gradient(circle, rgba(255,107,129,0.1) 0%, transparent 70%)";
         }
       }
 
-      // Update animation play state
+      // Update segmented ring (guided animations)
+      const ringScript = this._getScript(timer.animation);
+      if (ringScript && !ring) {
+        const gap = 4;
+        const allSegsDone = elapsed >= timer.targetSeconds;
+        for (let i = 0; i < ringScript.stages.length; i++) {
+          const seg = this.shadowRoot.getElementById(`ring-seg-${i}`);
+          if (!seg) continue;
+          const fraction = ringScript.stages[i].fraction;
+          const fullArc = Math.max(0, fraction * circumference - gap);
+
+          if (allSegsDone || i < timer._stageIndex) {
+            // Completed segment
+            seg.style.strokeDasharray = `${fullArc} ${circumference - fullArc}`;
+            seg.style.stroke = "var(--success, #50fa7b)";
+            seg.classList.add("seg-done");
+            seg.classList.remove("seg-active");
+          } else if (i === timer._stageIndex) {
+            // Current segment — partial fill
+            let cumBefore = 0;
+            for (let j = 0; j < i; j++) cumBefore += ringScript.stages[j].fraction;
+            const stageStart = cumBefore * timer.targetSeconds;
+            const stageDuration = fraction * timer.targetSeconds;
+            const stageProgress = Math.min(1, Math.max(0, (elapsed - stageStart) / stageDuration));
+            const currentArc = stageProgress * fullArc;
+            seg.style.strokeDasharray = `${currentArc} ${circumference - currentArc}`;
+            seg.style.stroke = "var(--accent, #66d9ef)";
+            seg.classList.add("seg-active");
+            seg.classList.remove("seg-done");
+          } else {
+            // Future segment — hidden
+            seg.style.strokeDasharray = `0 ${circumference}`;
+            seg.style.stroke = "rgba(255,255,255,0.1)";
+            seg.classList.remove("seg-done", "seg-active");
+          }
+        }
+      }
+
+      // Update animation play state and guided stage visuals
       const animEl = this.shadowRoot.getElementById("card-animation");
       if (animEl) {
         animEl.style.animationPlayState = timer.paused ? "paused" : "running";
@@ -400,6 +537,57 @@ class PsTimerTray extends HTMLElement {
             el.style.animationPlayState = timer.paused ? "paused" : "running";
           });
         }
+
+        // Guided animation: swap visual class on animation container
+        const script = this._getScript(timer.animation);
+        if (script) {
+          const stage = script.stages[timer._stageIndex];
+          if (stage) {
+            // Remove old stage classes, add current
+            for (const s of script.stages) {
+              animEl.classList.remove(s.visualClass);
+            }
+            animEl.classList.add(stage.visualClass);
+          }
+        }
+
+        // Teeth diagram: zone highlighting + brush positioning
+        if (timer.animation === "toothbrush-guided") {
+          const allDone = elapsed >= timer.targetSeconds;
+          animEl.querySelectorAll(".tooth-zone").forEach((zone) => {
+            const zoneIdx = parseInt(zone.dataset.stage);
+            zone.classList.toggle("zone-active", !allDone && zoneIdx === timer._stageIndex);
+            zone.classList.toggle("zone-done", allDone || zoneIdx < timer._stageIndex);
+          });
+          const brush = animEl.querySelector("#teeth-brush");
+          if (brush) {
+            if (allDone) {
+              brush.style.opacity = "0";
+            } else {
+              brush.style.opacity = "1";
+              const pos = PsTimerTray.BRUSH_POSITIONS[timer._stageIndex] || [90, 50, 1];
+              brush.setAttribute("transform", `translate(${pos[0]}, ${pos[1]}) scale(${pos[2]}, 1)`);
+              // Alternate scrub direction every ~8s (20 strokes)
+              const useH = Math.floor(elapsed / 8) % 2 === 1;
+              brush.classList.toggle("scrub-h", useH);
+            }
+          }
+        }
+      }
+
+      // Update stage label and dots
+      const stageLabel = this.shadowRoot.getElementById("card-stage-label");
+      const stageDots = this.shadowRoot.getElementById("card-stage-dots");
+      const script = this._getScript(timer.animation);
+      if (script && stageLabel) {
+        stageLabel.textContent = script.stages[timer._stageIndex]?.label || "";
+      }
+      if (script && stageDots) {
+        const dots = stageDots.querySelectorAll(".stage-dot");
+        dots.forEach((dot, i) => {
+          dot.classList.toggle("done", i < timer._stageIndex);
+          dot.classList.toggle("current", i === timer._stageIndex);
+        });
       }
 
       // Update pause button state
@@ -520,7 +708,7 @@ class PsTimerTray extends HTMLElement {
           timerMode: task.timerBonus.mode || "under",
           tickSound: task.timerBonus.tickSound || "click",
           hitSound: task.timerBonus.hitSound || "success",
-          animation: task.timerBonus.animation || "none",
+          animation: task.timerBonus.animationOverrides?.[entry.userId] ?? (task.timerBonus.animation || "none"),
           startTime: performance.now() - elapsed * 1000,
           elapsed,
           targetHitPlayed: false,
@@ -532,6 +720,8 @@ class PsTimerTray extends HTMLElement {
           pauseCooldownUntil: 0,
           remote: true,
           worklogId: entry.id,
+          _stageIndex: 0,
+          _lastEncourageKey: -1,
         });
       }
     }
@@ -573,6 +763,41 @@ class PsTimerTray extends HTMLElement {
         tracker.clockOut(entry.taskId, entry.userId).catch(() => {});
       }
     }
+  }
+
+  // --- Segmented ring for guided animations ---
+
+  _getSegmentedRingSvg(script, radius, circumference) {
+    const gap = 4;
+    let svg = `<circle class="ring-bg" cx="90" cy="90" r="${radius}" />`;
+
+    let cumulative = 0;
+    for (let i = 0; i < script.stages.length; i++) {
+      const fraction = script.stages[i].fraction;
+      const arcLen = Math.max(0, fraction * circumference - gap);
+      const remainder = circumference - arcLen;
+      const startOffset = -(cumulative * circumference + gap / 2);
+
+      svg += `<circle class="ring-segment" id="ring-seg-${i}" cx="90" cy="90" r="${radius}"
+        stroke-dasharray="${arcLen} ${remainder}"
+        stroke-dashoffset="${startOffset}" />`;
+
+      cumulative += fraction;
+    }
+
+    // Tick marks at stage boundaries
+    cumulative = 0;
+    for (let i = 0; i < script.stages.length - 1; i++) {
+      cumulative += script.stages[i].fraction;
+      const angle = cumulative * 2 * Math.PI;
+      const innerR = radius - 6;
+      const outerR = radius + 6;
+      svg += `<line class="ring-tick"
+        x1="${90 + innerR * Math.cos(angle)}" y1="${90 + innerR * Math.sin(angle)}"
+        x2="${90 + outerR * Math.cos(angle)}" y2="${90 + outerR * Math.sin(angle)}" />`;
+    }
+
+    return svg;
   }
 
   // --- Full render (structural changes only) ---
@@ -642,15 +867,33 @@ class PsTimerTray extends HTMLElement {
 
             <div class="ring-container">
               <svg class="ring-svg" viewBox="0 0 180 180">
-                <circle class="ring-bg" cx="90" cy="90" r="${radius}" />
-                <circle class="ring-progress" id="card-ring-progress" cx="90" cy="90" r="${radius}" />
+                ${(() => {
+                  const script = this._getScript(timer.animation);
+                  return script
+                    ? this._getSegmentedRingSvg(script, radius, circumference)
+                    : `<circle class="ring-bg" cx="90" cy="90" r="${radius}" />
+                       <circle class="ring-progress" id="card-ring-progress" cx="90" cy="90" r="${radius}" />`;
+                })()}
               </svg>
               <div class="ring-time">
                 <div class="card-time" id="card-display">${this._formatTime(elapsed)}</div>
               </div>
             </div>
 
-            ${timer.animation !== "none" ? `<div class="card-animation" id="card-animation">${this._getAnimationHtml(timer.animation)}</div>` : ""}
+            ${timer.animation !== "none" ? `<div class="card-animation${timer.animation === "toothbrush-guided" ? " teeth-variant" : ""}" id="card-animation">${this._getAnimationHtml(timer.animation)}</div>` : ""}
+
+            ${this._getScript(timer.animation) ? (() => {
+              const script = this._getScript(timer.animation);
+              const stage = script.stages[timer._stageIndex];
+              return `
+                <div class="stage-label" id="card-stage-label">${stage?.label || ""}</div>
+                <div class="stage-dots" id="card-stage-dots">
+                  ${script.stages.map((s, i) =>
+                    `<div class="stage-dot${i < timer._stageIndex ? " done" : ""}${i === timer._stageIndex ? " current" : ""}" title="${s.label}"></div>`
+                  ).join("")}
+                </div>
+              `;
+            })() : ""}
 
             <div id="card-status" class="card-status">${timer.timerMode === "over"
               ? `Spend at least ${this._formatTime(timer.targetSeconds)}`
@@ -740,7 +983,115 @@ class PsTimerTray extends HTMLElement {
     }
   }
 
+  _getTeethDiagramHtml() {
+    // Zone positions: [x, y, width, height] for each tooth
+    // Upper arch: zone 0 (upper-left), zone 1 (upper-front), zone 2 (upper-right)
+    // Lower arch: zone 3 (lower-left), zone 4 (lower-front), zone 5 (lower-right)
+    const zones = [
+      // Zone 0: Upper left (3 teeth, molars to premolars)
+      { teeth: [{x:32,y:32,w:10,h:16,rx:3},{x:44,y:30,w:10,h:18,rx:3},{x:56,y:28,w:10,h:20,rx:3}] },
+      // Zone 1: Upper front (4 teeth, incisors/canines)
+      { teeth: [{x:68,y:24,w:9,h:26,rx:3},{x:79,y:22,w:10,h:28,rx:3},{x:91,y:22,w:10,h:28,rx:3},{x:103,y:24,w:9,h:26,rx:3}] },
+      // Zone 2: Upper right (3 teeth)
+      { teeth: [{x:114,y:28,w:10,h:20,rx:3},{x:126,y:30,w:10,h:18,rx:3},{x:138,y:32,w:10,h:16,rx:3}] },
+      // Zone 3: Lower left (3 teeth)
+      { teeth: [{x:32,y:72,w:10,h:16,rx:3},{x:44,y:70,w:10,h:18,rx:3},{x:56,y:68,w:10,h:20,rx:3}] },
+      // Zone 4: Lower front (4 teeth)
+      { teeth: [{x:68,y:66,w:9,h:26,rx:3},{x:79,y:64,w:10,h:28,rx:3},{x:91,y:64,w:10,h:28,rx:3},{x:103,y:66,w:9,h:26,rx:3}] },
+      // Zone 5: Lower right (3 teeth)
+      { teeth: [{x:114,y:68,w:10,h:20,rx:3},{x:126,y:70,w:10,h:18,rx:3},{x:138,y:72,w:10,h:16,rx:3}] },
+    ];
+
+    let teethSvg = "";
+
+    // Seeded random for consistent grime placement
+    const seeded = (s) => () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; };
+
+    // Tooth zone groups
+    for (let z = 0; z < zones.length; z++) {
+      const rng = seeded(z * 1000 + 7);
+      teethSvg += `<g class="tooth-zone" data-stage="${z}">`;
+      for (const t of zones[z].teeth) {
+        teethSvg += `<rect class="tooth" x="${t.x}" y="${t.y}" width="${t.w}" height="${t.h}" rx="${t.rx}" />`;
+        // Grime splotches on each tooth (jagged irregular shapes)
+        for (let g = 0; g < 5; g++) {
+          const cx = t.x + 2 + rng() * (t.w - 4);
+          const cy = t.y + 3 + rng() * (t.h - 6);
+          const sz = 1.5 + rng() * 2.5;
+          const colors = ["rgba(90,100,30,0.7)", "rgba(50,160,50,0.5)", "rgba(30,30,30,0.6)", "rgba(140,130,40,0.65)", "rgba(70,130,50,0.55)", "rgba(20,20,15,0.5)", "rgba(160,150,60,0.6)", "rgba(40,80,30,0.6)"];
+          // Jagged polygon with 5-6 irregular points
+          const pts = [];
+          const numPts = 5 + Math.floor(rng() * 2);
+          for (let p = 0; p < numPts; p++) {
+            const a = (p / numPts) * Math.PI * 2;
+            const r = sz * (0.5 + rng() * 0.7);
+            pts.push(`${(cx + Math.cos(a) * r).toFixed(1)},${(cy + Math.sin(a) * r).toFixed(1)}`);
+          }
+          teethSvg += `<polygon class="grime" points="${pts.join(" ")}" fill="${colors[g % colors.length]}" />`;
+        }
+      }
+      teethSvg += `</g>`;
+    }
+
+    // Gum arcs (drawn on top of teeth — at the roots)
+    teethSvg += `<path class="gum-line" d="M24 30 Q90 18 156 30" />`;
+    teethSvg += `<path class="gum-line" d="M24 90 Q90 98 156 90" />`;
+
+    // Bubble layer (drawn on top of gums, grouped by zone for class toggling)
+    for (let z = 0; z < zones.length; z++) {
+      const zoneTeeth = zones[z].teeth;
+      const zMinX = Math.min(...zoneTeeth.map(t => t.x));
+      const zMaxX = Math.max(...zoneTeeth.map(t => t.x + t.w));
+      const zMinY = Math.min(...zoneTeeth.map(t => t.y));
+      const zMaxY = Math.max(...zoneTeeth.map(t => t.y + t.h));
+      const padX = 12, padY = 10;
+      const bRng = seeded(z * 2000 + 13);
+      teethSvg += `<g class="tooth-zone" data-stage="${z}">`;
+      for (let b = 0; b < 10; b++) {
+        const bx = (zMinX - padX) + bRng() * (zMaxX - zMinX + padX * 2);
+        const by = (zMinY - padY) + bRng() * (zMaxY - zMinY + padY * 2);
+        const br = 1.5 + bRng() * 3;
+        const delay = (bRng() * 2.5).toFixed(2);
+        const dur = (1.2 + bRng() * 1.2).toFixed(2);
+        teethSvg += `<circle class="bubble" cx="${bx.toFixed(1)}" cy="${by.toFixed(1)}" r="${br.toFixed(1)}" style="animation-delay:${delay}s;animation-duration:${dur}s" />`;
+      }
+      teethSvg += `</g>`;
+    }
+
+    // Toothbrush overlay (inner scrub group moves the whole brush)
+    teethSvg += `<g class="teeth-brush" id="teeth-brush">
+      <g class="tb-scrub">
+        <rect class="tb-handle" x="-50" y="-5" width="50" height="10" rx="4" fill="#8be9fd"/>
+        <rect x="0" y="-8" width="28" height="16" rx="4" fill="#f8f8f2"/>
+        <line x1="4" y1="-5" x2="4" y2="5" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="10" y1="-5" x2="10" y2="5" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="16" y1="-5" x2="16" y2="5" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="22" y1="-5" x2="22" y2="5" stroke="#a0a4be" stroke-width="1.5" stroke-linecap="round"/>
+      </g>
+    </g>`;
+
+    return `<svg class="anim-svg anim-teeth-diagram" viewBox="0 0 200 120">${teethSvg}</svg>`;
+  }
+
+  // Brush position per zone: [x, y, scaleX]
+  // Head is 28 wide (center at local x=14). scaleX=-1 mirrors, so offset accordingly.
+  static BRUSH_POSITIONS = [
+    [63, 38, -1],   // upper-left: teeth center ~49, +14 for mirrored head
+    [76, 36, 1],    // upper-front: teeth center ~90, -14 for head center
+    [117, 38, 1],   // upper-right: teeth center ~131, -14
+    [63, 78, -1],   // lower-left
+    [76, 80, 1],    // lower-front
+    [117, 78, 1],   // lower-right
+  ];
+
   _getAnimationHtml(key) {
+    // Teeth diagram for toothbrush-guided
+    if (key === "toothbrush-guided") return this._getTeethDiagramHtml();
+
+    // Other guided animations use the base animation's SVG
+    const script = ANIMATION_SCRIPTS[key];
+    if (script) key = script.baseAnimation;
+
     switch (key) {
       case "toothbrush":
         return `<svg class="anim-svg anim-toothbrush" viewBox="0 0 120 80" fill="none">
@@ -979,6 +1330,37 @@ class PsTimerTray extends HTMLElement {
         transition: stroke 0.6s ease, stroke-dashoffset 0.15s linear;
       }
 
+      /* Segmented ring (guided animations) */
+      .ring-segment {
+        fill: none;
+        stroke-width: 6;
+        stroke-linecap: round;
+        stroke: rgba(255, 255, 255, 0.1);
+        transition: stroke 0.4s ease;
+      }
+
+      .ring-tick {
+        stroke: rgba(255, 255, 255, 0.2);
+        stroke-width: 1.5;
+      }
+
+      .seg-done {
+        filter: drop-shadow(0 0 3px rgba(80, 250, 123, 0.4));
+      }
+
+      .seg-active {
+        filter: drop-shadow(0 0 3px rgba(102, 217, 239, 0.3));
+      }
+
+      .seg-flash {
+        animation: segFlash 600ms ease-out;
+      }
+
+      @keyframes segFlash {
+        0% { filter: drop-shadow(0 0 12px rgba(80, 250, 123, 0.8)); stroke-width: 8; }
+        100% { filter: drop-shadow(0 0 3px rgba(80, 250, 123, 0.4)); stroke-width: 6; }
+      }
+
       .ring-time {
         position: absolute;
         inset: 0;
@@ -1170,6 +1552,51 @@ class PsTimerTray extends HTMLElement {
         }
       }
 
+      /* --- Stage label & dots (guided animations) --- */
+      .stage-label {
+        position: relative;
+        font-size: 0.92rem;
+        font-weight: 600;
+        color: #f1fa8c;
+        text-align: center;
+        margin: 0 auto 6px;
+        transition: opacity 0.3s ease;
+        animation: stageLabelIn 0.3s ease-out;
+      }
+
+      @keyframes stageLabelIn {
+        from { opacity: 0; transform: translateY(-4px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .stage-dots {
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        margin: 0 auto 10px;
+      }
+
+      .stage-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1.5px solid rgba(255, 255, 255, 0.15);
+        transition: background 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
+      }
+
+      .stage-dot.current {
+        background: #f1fa8c;
+        border-color: #f1fa8c;
+        transform: scale(1.25);
+        box-shadow: 0 0 8px rgba(241, 250, 140, 0.4);
+      }
+
+      .stage-dot.done {
+        background: #50fa7b;
+        border-color: #50fa7b;
+      }
+
       /* --- Task animations --- */
       .card-animation {
         position: relative;
@@ -1179,6 +1606,7 @@ class PsTimerTray extends HTMLElement {
         justify-content: center;
         margin: 4px auto 8px;
         overflow: hidden;
+        transition: transform 0.3s ease;
       }
 
       .anim-svg {
@@ -1260,6 +1688,117 @@ class PsTimerTray extends HTMLElement {
         0%, 100% { transform: translateX(-16px) rotate(-8deg); }
         50% { transform: translateX(16px) rotate(8deg); }
       }
+
+      /* --- Guided animation stage variants --- */
+
+      /* Teeth diagram (toothbrush-guided) */
+      .card-animation.teeth-variant {
+        height: 120px;
+      }
+
+      .anim-teeth-diagram {
+        height: 110px;
+        width: auto;
+      }
+
+      .tooth {
+        fill: rgba(230, 240, 180, 0.7);
+        transition: fill 0.4s ease, filter 0.4s ease;
+      }
+
+      .grime {
+        transition: opacity 0.4s ease;
+      }
+
+      .zone-active .grime,
+      .zone-done .grime {
+        opacity: 0;
+      }
+
+      .bubble {
+        fill: rgba(200, 230, 255, 0.3);
+        stroke: rgba(220, 240, 255, 0.8);
+        stroke-width: 0.8;
+        opacity: 0;
+        transform-box: fill-box;
+        transform-origin: center;
+      }
+
+      .zone-active .bubble {
+        animation: bubblePop 1.8s ease-in-out infinite;
+      }
+
+      @keyframes bubblePop {
+        0%   { opacity: 0; transform: scale(0) translateY(0); }
+        20%  { opacity: 0.9; transform: scale(0.8) translateY(-1px); }
+        50%  { opacity: 1; transform: scale(1.2) translateY(-3px); }
+        80%  { opacity: 0.7; transform: scale(1) translateY(-5px); }
+        100% { opacity: 0; transform: scale(0) translateY(-7px); }
+      }
+
+      .gum-line {
+        stroke: rgb(180, 75, 95);
+        stroke-width: 12;
+        stroke-linecap: round;
+        fill: none;
+      }
+
+      .zone-active .tooth {
+        fill: rgba(220, 240, 255, 0.75);
+        filter: drop-shadow(0 0 8px rgba(180, 220, 255, 0.5));
+        animation: foamy 0.6s ease-in-out infinite alternate;
+      }
+
+      @keyframes foamy {
+        0% { filter: drop-shadow(0 0 6px rgba(180, 220, 255, 0.4)); }
+        100% { filter: drop-shadow(0 0 10px rgba(200, 235, 255, 0.7)); }
+      }
+
+      .zone-done .tooth {
+        fill: rgba(255, 255, 255, 0.92);
+        filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.3));
+      }
+
+      .teeth-brush {
+        transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.5s ease;
+      }
+
+      .teeth-brush .tb-scrub {
+        animation: scrubV 0.4s ease-in-out infinite;
+      }
+
+      .teeth-brush.scrub-h .tb-scrub {
+        animation-name: scrubH;
+      }
+
+      @keyframes scrubV {
+        0%, 100% { transform: translate(0, 0); }
+        25%  { transform: translateY(-3px); }
+        75%  { transform: translateY(3px); }
+      }
+      @keyframes scrubH {
+        0%, 100% { transform: translate(0, 0); }
+        25%  { transform: translateX(-10px); }
+        75%  { transform: translateX(10px); }
+      }
+
+      /* Exercise guided: speed/style changes */
+      .stage-warmup .anim-svg   { animation-duration: 1.2s; }
+      .stage-jumping .anim-svg  { animation-duration: 0.5s; }
+      .stage-stretch .anim-svg  { animation-duration: 2.0s; }
+      .stage-squats .anim-svg   { animation-duration: 0.7s; }
+      .stage-cooldown .anim-svg { animation-duration: 2.5s; }
+
+      /* Reading guided: subtle scale/opacity shifts */
+      .stage-read-start .anim-svg { opacity: 0.8; }
+      .stage-read-mid .anim-svg   { opacity: 1; transform: scale(1.05); }
+      .stage-read-end .anim-svg   { opacity: 1; transform: scale(1.1); }
+
+      /* Cleaning guided: sweep style changes */
+      .stage-pickup .anim-svg  { animation-duration: 1.0s; }
+      .stage-wipe .anim-svg    { animation-duration: 0.6s; }
+      .stage-sweep .anim-svg   { animation-duration: 1.4s; }
+      .stage-check .anim-svg   { animation-duration: 2.0s; }
     `;
   }
 }

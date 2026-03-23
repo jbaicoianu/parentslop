@@ -207,6 +207,7 @@ class PsAdminTasks extends HTMLElement {
     const timerTickSound = task?.timerBonus?.tickSound || "click";
     const timerHitSound = task?.timerBonus?.hitSound || "success";
     const timerAnimation = task?.timerBonus?.animation || "none";
+    const timerAnimationOverrides = task?.timerBonus?.animationOverrides || {};
     const bonusCriteria = task?.bonusCriteria || [];
     const activeDays = task?.activeDays || [];
     const deadline = task?.deadline || "";
@@ -489,6 +490,7 @@ class PsAdminTasks extends HTMLElement {
               <label>Hit sound</label>
               <select id="f-timer-hit">
                 <option value="success" ${timerHitSound === "success" ? "selected" : ""}>Success chime</option>
+                <option value="celebrate" ${timerHitSound === "celebrate" ? "selected" : ""}>Celebrate!</option>
                 <option value="warning" ${timerHitSound === "warning" ? "selected" : ""}>Warning tone</option>
                 <option value="none" ${timerHitSound === "none" ? "selected" : ""}>None</option>
               </select>
@@ -499,10 +501,36 @@ class PsAdminTasks extends HTMLElement {
             <select id="f-timer-animation">
               <option value="none" ${timerAnimation === "none" ? "selected" : ""}>None</option>
               <option value="toothbrush" ${timerAnimation === "toothbrush" ? "selected" : ""}>Toothbrush</option>
+              <option value="toothbrush-guided" ${timerAnimation === "toothbrush-guided" ? "selected" : ""}>Toothbrush (guided)</option>
               <option value="exercise" ${timerAnimation === "exercise" ? "selected" : ""}>Exercise</option>
+              <option value="exercise-guided" ${timerAnimation === "exercise-guided" ? "selected" : ""}>Exercise (guided)</option>
               <option value="reading" ${timerAnimation === "reading" ? "selected" : ""}>Reading</option>
+              <option value="reading-guided" ${timerAnimation === "reading-guided" ? "selected" : ""}>Reading (guided)</option>
               <option value="cleaning" ${timerAnimation === "cleaning" ? "selected" : ""}>Cleaning</option>
+              <option value="cleaning-guided" ${timerAnimation === "cleaning-guided" ? "selected" : ""}>Cleaning (guided)</option>
             </select>
+          </div>
+          <div id="animation-overrides-section" style="${timerAnimation !== "none" ? "" : "display:none"}">
+            <div class="section-label">Per-user animation override</div>
+            ${users.filter(u => u.role !== "parent").map((u) => {
+              const ov = timerAnimationOverrides[u.id] || "";
+              return `
+              <div class="reward-row">
+                <span class="currency-name">${u.name}</span>
+                <select data-anim-override="${u.id}">
+                  <option value="" ${ov === "" ? "selected" : ""}>Default</option>
+                  <option value="none" ${ov === "none" ? "selected" : ""}>None</option>
+                  <option value="toothbrush" ${ov === "toothbrush" ? "selected" : ""}>Toothbrush</option>
+                  <option value="toothbrush-guided" ${ov === "toothbrush-guided" ? "selected" : ""}>Toothbrush (guided)</option>
+                  <option value="exercise" ${ov === "exercise" ? "selected" : ""}>Exercise</option>
+                  <option value="exercise-guided" ${ov === "exercise-guided" ? "selected" : ""}>Exercise (guided)</option>
+                  <option value="reading" ${ov === "reading" ? "selected" : ""}>Reading</option>
+                  <option value="reading-guided" ${ov === "reading-guided" ? "selected" : ""}>Reading (guided)</option>
+                  <option value="cleaning" ${ov === "cleaning" ? "selected" : ""}>Cleaning</option>
+                  <option value="cleaning-guided" ${ov === "cleaning-guided" ? "selected" : ""}>Cleaning (guided)</option>
+                </select>
+              </div>
+            `; }).join("")}
           </div>
 
           <div class="section-label">Bonus Criteria (optional)</div>
@@ -621,6 +649,15 @@ class PsAdminTasks extends HTMLElement {
       updateRewardsLabel();
     }
 
+    // Toggle animation overrides visibility when animation changes
+    const animEl = this.shadowRoot.getElementById("f-timer-animation");
+    const animOverrides = this.shadowRoot.getElementById("animation-overrides-section");
+    if (animEl && animOverrides) {
+      animEl.addEventListener("change", () => {
+        animOverrides.style.display = animEl.value !== "none" ? "" : "none";
+      });
+    }
+
     // Bonus criteria: add / remove
     const criteriaList = this.shadowRoot.getElementById("bonus-criteria-list");
     const addCriterionBtn = this.shadowRoot.getElementById("add-criterion");
@@ -718,7 +755,16 @@ class PsAdminTasks extends HTMLElement {
       const ttick = s.getElementById("f-timer-tick")?.value || "click";
       const thit = s.getElementById("f-timer-hit")?.value || "success";
       const tanim = s.getElementById("f-timer-animation")?.value || "none";
-      data.timerBonus = (tt > 0 && tm > 0) ? { targetSeconds: tt, multiplier: tm, mode: tmode, tickSound: ttick, hitSound: thit, animation: tanim !== "none" ? tanim : undefined } : null;
+      if (tt > 0 && tm > 0) {
+        data.timerBonus = { targetSeconds: tt, multiplier: tm, mode: tmode, tickSound: ttick, hitSound: thit, animation: tanim !== "none" ? tanim : undefined };
+        const animOverrides = {};
+        s.querySelectorAll("[data-anim-override]").forEach((sel) => {
+          if (sel.value) animOverrides[sel.dataset.animOverride] = sel.value;
+        });
+        if (Object.keys(animOverrides).length > 0) data.timerBonus.animationOverrides = animOverrides;
+      } else {
+        data.timerBonus = null;
+      }
 
       const bonusCriteria = [];
       s.querySelectorAll(".bonus-criterion-row").forEach((row) => {
