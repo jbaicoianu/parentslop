@@ -9,6 +9,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --production && apk del python3 make g++ unzip
 
 COPY server.js ./
+COPY lib/ ./lib/
 COPY static/ ./static/
 
 # Stamp build time into footer
