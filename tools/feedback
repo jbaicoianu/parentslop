@@ -1,0 +1,241 @@
+#!/usr/bin/env node
+// tools/feedback — CLI for managing ParentSlop feedback
+//
+// Usage:
+//   tools/feedback                     # list open feedback
+//   tools/feedback list                # list open feedback
+//   tools/feedback all                 # list all feedback (including completed)
+//   tools/feedback done <id> <note>    # mark feedback as completed
+//   tools/feedback --remote list       # list from remote (parentslop.com)
+//   tools/feedback --remote done <id> <note>
+//
+// Remote auth env vars:
+//   PARENTSLOP_URL      (default: https://parentslop.com)
+//   PARENTSLOP_FAMILY   (family name)
+//   PARENTSLOP_PASSWORD (family password)
+//   PARENTSLOP_MEMBER   (admin member name)
+
+const path = require("path");
+const fs = require("fs");
+
+const DB_PATH = path.join(__dirname, "..", "parentslop.db");
+const CRSQLITE_EXT = path.join(__dirname, "..", "node_modules/@vlcn.io/crsqlite/dist/crsqlite");
+
+// ---- Argument parsing ----
+
+const args = process.argv.slice(2);
+const remote = args.includes("--remote");
+const filtered = args.filter(a => a !== "--remote");
+const command = filtered[0] || "list";
+
+// ---- Color helpers ----
+
+const c = {
+  reset: "\x1b[0m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
+  bold: "\x1b[1m",
+};
+
+// ---- Local DB access ----
+
+function openDb() {
+  const Database = require("better-sqlite3");
+  const db = new Database(DB_PATH, { readonly: command === "list" || command === "all" });
+  try {
+    db.loadExtension(CRSQLITE_EXT);
+  } catch (e) {
+    // Extension may already be loaded or not needed for reads
+  }
+  return db;
+}
+
+function localList(includeCompleted) {
+  const db = openDb();
+  const where = includeCompleted ? "" : "WHERE completed_at IS NULL";
+  const rows = db.prepare(`
+    SELECT id, text, user_name, current_view, created_at, completed_at, resolution_note
+    FROM feedback ${where}
+    ORDER BY created_at
+  `).all();
+  db.close();
+  return rows;
+}
+
+function localDone(id, note) {
+  const db = openDb();
+  const row = db.prepare("SELECT id, text FROM feedback WHERE id LIKE ? || '%'").get(id);
+  if (!row) {
+    console.error(`${c.red}No feedback found matching "${id}"${c.reset}`);
+    process.exit(1);
+  }
+  db.prepare("UPDATE feedback SET completed_at = datetime('now'), resolution_note = ? WHERE id = ?")
+    .run(note, row.id);
+  db.close();
+  return row;
+}
+
+// ---- Remote API access ----
+
+async function remoteFetch(urlPath, options = {}) {
+  const base = process.env.PARENTSLOP_URL || "https://parentslop.com";
+  const url = `${base}${urlPath}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...options.headers },
+    redirect: "manual",
+  });
+  return res;
+}
+
+let _sessionCookie = null;
+
+async function remoteLogin() {
+  const family = process.env.PARENTSLOP_FAMILY;
+  const password = process.env.PARENTSLOP_PASSWORD;
+  const memberName = process.env.PARENTSLOP_MEMBER;
+
+  if (!family || !password || !memberName) {
+    console.error(`${c.red}Remote mode requires env vars: PARENTSLOP_FAMILY, PARENTSLOP_PASSWORD, PARENTSLOP_MEMBER${c.reset}`);
+    process.exit(1);
+  }
+
+  // Login
+  const loginRes = await remoteFetch("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ familyName: family, password }),
+  });
+  const loginBody = await loginRes.json();
+  if (!loginBody.ok) {
+    console.error(`${c.red}Login failed: ${loginBody.error || "unknown error"}${c.reset}`);
+    process.exit(1);
+  }
+
+  // Extract session cookie
+  const setCookie = loginRes.headers.get("set-cookie") || "";
+  const match = setCookie.match(/connect\.sid=([^;]+)/);
+  if (!match) {
+    console.error(`${c.red}No session cookie in login response${c.reset}`);
+    process.exit(1);
+  }
+  _sessionCookie = `connect.sid=${match[1]}`;
+
+  // Select admin member
+  const members = loginBody.members || [];
+  const member = members.find(m =>
+    m.name.toLowerCase() === memberName.toLowerCase() ||
+    m.id === memberName
+  );
+  if (!member) {
+    console.error(`${c.red}Member "${memberName}" not found. Available: ${members.map(m => m.name).join(", ")}${c.reset}`);
+    process.exit(1);
+  }
+
+  const selectRes = await remoteFetch("/api/auth/select-member", {
+    method: "POST",
+    body: JSON.stringify({ memberId: member.id }),
+    headers: { Cookie: _sessionCookie },
+  });
+  const selectBody = await selectRes.json();
+  if (!selectBody.ok) {
+    console.error(`${c.red}Member selection failed: ${selectBody.error || "unknown error"}${c.reset}`);
+    process.exit(1);
+  }
+}
+
+async function remoteList() {
+  await remoteLogin();
+  const res = await remoteFetch("/api/feedback", {
+    headers: { Cookie: _sessionCookie },
+  });
+  return await res.json();
+}
+
+async function remoteDone(id, note) {
+  await remoteLogin();
+  const res = await remoteFetch(`/api/feedback/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ completed: true, note }),
+    headers: { Cookie: _sessionCookie },
+  });
+  const body = await res.json();
+  if (body.error) {
+    console.error(`${c.red}Failed: ${body.error}${c.reset}`);
+    process.exit(1);
+  }
+  return body;
+}
+
+// ---- Display ----
+
+function printFeedback(rows, includeCompleted) {
+  const open = rows.filter(r => !r.completed_at);
+  const done = rows.filter(r => r.completed_at);
+
+  if (open.length === 0 && !includeCompleted) {
+    console.log(`${c.green}No open feedback.${c.reset}`);
+    return;
+  }
+
+  console.log(`${c.bold}Open feedback (${open.length}):${c.reset}\n`);
+  for (const r of open) {
+    const shortId = r.id.slice(0, 8);
+    const date = r.created_at?.slice(0, 10) || "?";
+    const view = r.current_view || "?";
+    console.log(`  ${c.cyan}${shortId}${c.reset}  ${c.dim}${date}  ${view}  @${r.user_name || "?"}${c.reset}`);
+    console.log(`  ${r.text}\n`);
+  }
+
+  if (includeCompleted && done.length > 0) {
+    console.log(`${c.bold}Completed (${done.length}):${c.reset}\n`);
+    for (const r of done) {
+      const shortId = r.id.slice(0, 8);
+      const date = r.completed_at?.slice(0, 10) || "?";
+      console.log(`  ${c.green}${shortId}${c.reset}  ${c.dim}${date}${c.reset}  ${c.dim}${r.resolution_note || ""}${c.reset}`);
+      console.log(`  ${c.dim}${r.text}${c.reset}\n`);
+    }
+  }
+}
+
+// ---- Main ----
+
+async function main() {
+  try {
+    if (command === "list" || command === "all") {
+      const includeCompleted = command === "all";
+      if (remote) {
+        const rows = await remoteList();
+        printFeedback(rows, includeCompleted);
+      } else {
+        const rows = localList(includeCompleted);
+        printFeedback(rows, includeCompleted);
+      }
+    } else if (command === "done") {
+      const id = filtered[1];
+      const note = filtered.slice(2).join(" ");
+      if (!id || !note) {
+        console.error(`${c.red}Usage: tools/feedback done <id> <note>${c.reset}`);
+        process.exit(1);
+      }
+      if (remote) {
+        await remoteDone(id, note);
+        console.log(`${c.green}Marked ${id} as done (remote).${c.reset}`);
+      } else {
+        const row = localDone(id, note);
+        console.log(`${c.green}Marked ${row.id.slice(0, 8)} as done: ${row.text.slice(0, 60)}...${c.reset}`);
+      }
+    } else {
+      console.error(`Unknown command: ${command}`);
+      console.error("Usage: tools/feedback [list|all|done <id> <note>] [--remote]");
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error(`${c.red}Error: ${err.message}${c.reset}`);
+    process.exit(1);
+  }
+}
+
+main();

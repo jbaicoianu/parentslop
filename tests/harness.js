@@ -16,13 +16,17 @@ const os = require("os");
 const SERVER_JS = path.join(__dirname, "..", "server.js");
 const PROD_DB = path.join(__dirname, "..", "parentslop.db");
 
-// Track temp files for cleanup on exit (handles process.exit() in test code)
+// Track temp files/dirs for cleanup on exit (handles process.exit() in test code)
 const pendingCleanup = [];
+const pendingDirCleanup = [];
 process.on("exit", () => {
   for (const tmpDb of pendingCleanup) {
     for (const f of [tmpDb, tmpDb + "-wal", tmpDb + "-shm"]) {
       try { fs.unlinkSync(f); } catch {}
     }
+  }
+  for (const dir of pendingDirCleanup) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   }
 });
 
@@ -33,8 +37,12 @@ process.on("exit", () => {
 async function startServer({ tmpDb, extraEnv = {} } = {}) {
   pendingCleanup.push(tmpDb);
 
+  // Each test server gets its own temp data directory
+  const tmpDataDir = path.join(os.tmpdir(), `parentslop-data-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+  pendingDirCleanup.push(tmpDataDir);
+
   const server = spawn(process.execPath, [SERVER_JS, "--db", tmpDb], {
-    env: { ...process.env, PORT: "0", ...extraEnv },
+    env: { ...process.env, PORT: "0", DATA_DIR: tmpDataDir, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
 

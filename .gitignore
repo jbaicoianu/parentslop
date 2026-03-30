@@ -3,5 +3,7 @@ parentslop.db
 parentslop.db-shm
 parentslop.db-wal
 backups/
+data/
+events/
 session.json
 .migration-credentials

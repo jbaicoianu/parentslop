@@ -6,10 +6,13 @@ const crypto = require("crypto");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 const { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const eventLog = require("./lib/event-log");
+const { initFieldVersionsTable, buildFields, updateFieldVersions, clearFieldVersions, applyEvent, EVENT_TABLES, PK_COL, BALANCE_TABLES } = require("./lib/apply-event");
 
 const CRSQLITE_EXT = path.join(__dirname, "node_modules/@vlcn.io/crsqlite/dist/crsqlite");
 const BACKUP_BUCKET = process.env.BACKUP_BUCKET || null;
 const s3 = BACKUP_BUCKET ? new S3Client() : null;
+const SITE_ID = process.env.HOSTNAME || `server-${crypto.randomUUID().slice(0, 8)}`;
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -22,50 +25,133 @@ const DB_PATH = dbArg !== -1 && process.argv[dbArg + 1]
   : path.join(__dirname, "parentslop.db");
 
 // Check DB integrity before doing anything else. If corrupt, try restoring from S3.
+// IMPORTANT: During rolling deployments, another process may hold a lock on the DB.
+// We must distinguish SQLITE_BUSY (locked, not corrupt) from actual corruption.
 async function ensureHealthyDb() {
   if (!fs.existsSync(DB_PATH)) return;
-  let testDb;
-  try {
-    // Clean up stale SHM file (shared-memory index — safely reconstructed by SQLite).
-    // Do NOT delete the WAL file: it may contain committed transactions that haven't
-    // been checkpointed into the main DB yet (e.g. recent sessions). SQLite will
-    // replay/recover it automatically on open.
-    const shmPath = DB_PATH + "-shm";
-    if (fs.existsSync(shmPath)) {
-      console.log("Removing stale -shm file");
-      fs.unlinkSync(shmPath);
-    }
-    testDb = new Database(DB_PATH);
-    testDb.loadExtension(CRSQLITE_EXT);
-    const result = testDb.pragma("integrity_check");
-    if (result[0]?.integrity_check !== "ok") throw new Error(`integrity_check: ${result[0]?.integrity_check}`);
-    // Also verify tables are actually readable
-    testDb.prepare("SELECT count(*) FROM stores").get();
-    testDb.prepare("SELECT count(*) FROM feedback").get();
-    try { testDb.exec("SELECT crsql_finalize()"); } catch {}
-    testDb.close();
-  } catch (e) {
-    if (testDb) try { testDb.exec("SELECT crsql_finalize()"); } catch {}
-    if (testDb) try { testDb.close(); } catch {}
-    console.error(`DB corrupt: ${e.message}`);
-    if (!s3) { console.error("No BACKUP_BUCKET configured — cannot auto-restore"); return; }
-    console.log("Attempting restore from S3...");
+
+  // Retry loop: during rolling deploys the old container may still hold the lock.
+  // Wait up to ~60s for it to release before giving up.
+  const MAX_RETRIES = 12;
+  const RETRY_DELAY_MS = 5000;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    let testDb;
     try {
-      const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
-      const backups = (list.Contents || []).sort((a, b) => b.LastModified - a.LastModified);
-      if (backups.length === 0) { console.error("No backups found in S3"); return; }
-      const latest = backups[0];
-      console.log(`Restoring from ${latest.Key} (${latest.LastModified.toISOString()})`);
-      const resp = await s3.send(new GetObjectCommand({ Bucket: BACKUP_BUCKET, Key: latest.Key }));
-      const chunks = []; for await (const chunk of resp.Body) chunks.push(chunk);
-      // Move corrupt DB aside
-      fs.renameSync(DB_PATH, DB_PATH + ".corrupt");
-      for (const suf of ["-wal", "-shm"]) { try { fs.unlinkSync(DB_PATH + suf); } catch {} }
-      fs.writeFileSync(DB_PATH, Buffer.concat(chunks));
-      console.log("Restore complete");
-    } catch (restoreErr) {
-      console.error("Restore failed:", restoreErr.message);
+      // Clean up stale SHM file ONLY if no other process seems to hold a lock.
+      // The SHM is safely reconstructed by SQLite when opening in WAL mode.
+      // Do NOT delete the WAL file: it may contain committed transactions.
+      const shmPath = DB_PATH + "-shm";
+      if (fs.existsSync(shmPath)) {
+        console.log("Removing stale -shm file");
+        fs.unlinkSync(shmPath);
+      }
+      testDb = new Database(DB_PATH);
+      testDb.loadExtension(CRSQLITE_EXT);
+      const result = testDb.pragma("integrity_check");
+      if (result[0]?.integrity_check !== "ok") throw new Error(`integrity_check: ${result[0]?.integrity_check}`);
+      // Also verify tables are actually readable
+      testDb.prepare("SELECT count(*) FROM stores").get();
+      testDb.prepare("SELECT count(*) FROM feedback").get();
+      try { testDb.exec("SELECT crsql_finalize()"); } catch {}
+      testDb.close();
+      console.log("DB integrity check passed");
+      return; // DB is healthy
+    } catch (e) {
+      if (testDb) try { testDb.exec("SELECT crsql_finalize()"); } catch {}
+      if (testDb) try { testDb.close(); } catch {}
+
+      // Check if this is a lock/busy error (NOT corruption)
+      const isBusy = e.message && (
+        e.message.includes("SQLITE_BUSY") ||
+        e.message.includes("database is locked") ||
+        e.message.includes("database table is locked") ||
+        e.message.includes("error during initialization")
+      );
+
+      if (isBusy) {
+        if (attempt < MAX_RETRIES) {
+          console.log(`DB locked (attempt ${attempt}/${MAX_RETRIES}), waiting ${RETRY_DELAY_MS/1000}s for other process to release...`);
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+          continue;
+        }
+        // Exhausted retries but DB is locked, not corrupt — do NOT restore from backup
+        console.error(`DB still locked after ${MAX_RETRIES} attempts. Proceeding anyway (NOT restoring from backup).`);
+        return;
+      }
+
+      // Genuine corruption — attempt S3 restore
+      console.error(`DB corrupt: ${e.message}`);
+      if (!s3) { console.error("No BACKUP_BUCKET configured — cannot auto-restore"); return; }
+      console.log("Attempting restore from S3...");
+      try {
+        const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
+        const backups = (list.Contents || []).sort((a, b) => b.LastModified - a.LastModified);
+        if (backups.length === 0) { console.error("No backups found in S3"); return; }
+        const latest = backups[0];
+        console.log(`Restoring from ${latest.Key} (${latest.LastModified.toISOString()})`);
+        const resp = await s3.send(new GetObjectCommand({ Bucket: BACKUP_BUCKET, Key: latest.Key }));
+        const chunks = []; for await (const chunk of resp.Body) chunks.push(chunk);
+        // Move corrupt DB aside
+        fs.renameSync(DB_PATH, DB_PATH + ".corrupt");
+        for (const suf of ["-wal", "-shm"]) { try { fs.unlinkSync(DB_PATH + suf); } catch {} }
+        fs.writeFileSync(DB_PATH, Buffer.concat(chunks));
+        console.log("Restore complete");
+      } catch (restoreErr) {
+        console.error("Restore failed:", restoreErr.message);
+      }
+      return;
     }
+  }
+}
+
+// Check if a .corrupt file (misnamed by previous buggy deploys) actually has more data
+// than the current DB. If so, swap it in as the primary database.
+function recoverFromCorruptFile() {
+  const corruptPath = DB_PATH + ".corrupt";
+  if (!fs.existsSync(corruptPath)) return;
+  if (!fs.existsSync(DB_PATH)) {
+    // No main DB but .corrupt exists — just rename it back
+    console.log("No main DB found but .corrupt exists — recovering it");
+    fs.renameSync(corruptPath, DB_PATH);
+    return;
+  }
+
+  try {
+    const mainSize = fs.statSync(DB_PATH).size;
+    const corruptSize = fs.statSync(corruptPath).size;
+    // Also check WAL file sizes
+    let mainWalSize = 0, corruptWalSize = 0;
+    try { mainWalSize = fs.statSync(DB_PATH + "-wal").size; } catch {}
+    try { corruptWalSize = fs.statSync(corruptPath + "-wal").size; } catch {}
+
+    console.log(`DB sizes: main=${mainSize}+wal${mainWalSize}, corrupt=${corruptSize}+wal${corruptWalSize}`);
+
+    // If the .corrupt file is significantly larger, it likely has more data
+    if (corruptSize > mainSize * 1.1 || (corruptSize >= mainSize && corruptWalSize > mainWalSize)) {
+      console.log("RECOVERY: .corrupt file appears to have more data — swapping it in");
+      // Move current (stale backup) aside
+      const stalePath = DB_PATH + ".stale-backup";
+      fs.renameSync(DB_PATH, stalePath);
+      for (const suf of ["-wal", "-shm"]) {
+        try { fs.renameSync(DB_PATH + suf, stalePath + suf); } catch {}
+      }
+      // Restore the .corrupt file as the main DB
+      fs.renameSync(corruptPath, DB_PATH);
+      for (const suf of ["-wal", "-shm"]) {
+        try { fs.renameSync(corruptPath + suf, DB_PATH + suf); } catch {}
+      }
+      console.log("RECOVERY: .corrupt file restored as main DB");
+    } else {
+      console.log(".corrupt file is not larger — keeping current DB");
+      // Clean up the .corrupt file
+      try { fs.unlinkSync(corruptPath); } catch {}
+      for (const suf of ["-wal", "-shm"]) {
+        try { fs.unlinkSync(corruptPath + suf); } catch {}
+      }
+    }
+  } catch (e) {
+    console.error("Recovery check failed:", e.message);
   }
 }
 
@@ -408,6 +494,112 @@ function initDb() {
       last_sync_at TEXT
     )
   `);
+
+  // --- Event log: field_versions table (LWW version tracking) ---
+  initFieldVersionsTable(db);
+}
+
+// --- Event log helpers -------------------------------------------------------
+
+// Emit an event to the append-only log (best-effort: logs errors but does not fail the request).
+// Also updates local field_versions to track LWW state.
+//
+// Inserts use a flat `data` object (readable, all fields implicitly ver=1).
+// Updates use LWW-versioned `fields` (only changed fields, with version numbers).
+// Deletes have neither.
+function emitEvent(familyId, table, pk, op, data) {
+  if (!eventLog.isEnabled()) return;
+  try {
+    const pkCol = PK_COL[table] || "id";
+
+    if (op === "delete") {
+      clearFieldVersions(db, table, pk);
+      eventLog.appendEvent(familyId, { table, pk, op, site_id: SITE_ID });
+      return;
+    }
+
+    if (op === "insert" || op === "upsert") {
+      // Flat data for inserts — strip family_id (on envelope), pk col, nulls, empty defaults
+      const clean = {};
+      for (const [col, value] of Object.entries(data || {})) {
+        if (col === pkCol || col === "family_id" || col === "_client_id") continue;
+        if (value === null || value === undefined || value === "" || value === "[]" || value === "{}") continue;
+        clean[col] = value;
+      }
+      // Track field versions locally (all ver=1 for new inserts)
+      const fields = buildFields(db, table, pk, data || {});
+      updateFieldVersions(db, table, pk, fields);
+      eventLog.appendEvent(familyId, { table, pk, op, data: clean, site_id: SITE_ID });
+    } else {
+      // Updates: LWW-versioned fields (only changed columns)
+      const fields = buildFields(db, table, pk, data || {});
+      updateFieldVersions(db, table, pk, fields);
+      // Strip family_id from fields (redundant with envelope)
+      delete fields.family_id;
+      eventLog.appendEvent(familyId, { table, pk, op, fields, site_id: SITE_ID });
+    }
+  } catch (e) {
+    console.error(`Event emission failed (${table}/${pk}/${op}):`, e.message);
+  }
+}
+
+// Tables included in per-family snapshots (event-sourced tables + derived balances)
+const FAMILY_SNAPSHOT_TABLES = [
+  "stores", "feedback", "tasks", "users", "currencies", "shop_items",
+  "completions", "redemptions", "balance_adjustments", "job_claims", "worklog_entries",
+  "user_balances", "field_versions",
+];
+
+/** Write a snapshot for a single family to its local data directory. */
+function writeFamilySnapshot(familyId) {
+  if (!eventLog.isEnabled()) return;
+  const data = {
+    created_at: new Date().toISOString(),
+    last_event_id: eventLog.generateId(),
+    tables: {},
+  };
+  for (const table of FAMILY_SNAPSHOT_TABLES) {
+    try {
+      // field_versions are keyed by (tbl, pk, col), not family_id — grab all for this family's rows
+      if (table === "field_versions") {
+        data.tables[table] = db.prepare(`SELECT * FROM field_versions`).all();
+      } else {
+        data.tables[table] = db.prepare(`SELECT * FROM "${table}" WHERE family_id = ?`).all(familyId);
+      }
+    } catch { /* table may not exist yet */ }
+  }
+  eventLog.writeLocalSnapshot(familyId, data);
+  const rowCount = Object.values(data.tables).reduce((s, t) => s + (t?.length || 0), 0);
+  console.log(`Snapshot written for family ${familyId} (${rowCount} rows)`);
+}
+
+/** Write snapshots for all families. */
+function writeAllSnapshots() {
+  if (!eventLog.isEnabled()) return;
+  const families = db.prepare("SELECT DISTINCT id FROM families").all();
+  for (const f of families) {
+    try {
+      writeFamilySnapshot(f.id);
+    } catch (e) {
+      console.error(`Snapshot failed for family ${f.id}:`, e.message);
+    }
+  }
+}
+
+function loadSnapshot(snapshot) {
+  for (const [table, rows] of Object.entries(snapshot.tables || {})) {
+    if (!rows || rows.length === 0) continue;
+    const cols = Object.keys(rows[0]);
+    const ph = cols.map(() => "?").join(", ");
+    const stmt = db.prepare(
+      `INSERT OR IGNORE INTO "${table}" (${cols.map(c => `"${c}"`).join(", ")}) VALUES (${ph})`
+    );
+    const tx = db.transaction((rs) => {
+      for (const row of rs) stmt.run(...cols.map(c => row[c] ?? null));
+    });
+    tx(rows);
+    console.log(`  Loaded ${rows.length} rows into ${table}`);
+  }
 }
 
 // --- Password hashing utilities ----------------------------------------------
@@ -542,7 +734,7 @@ app.get("/api/store/:key", requireFamilyAuth, (req, res) => {
 });
 
 // PUT /api/store/:key — upsert a single store
-app.put("/api/store/:key", requireFamilyAuth, (req, res) => {
+app.put("/api/store/:key", requireFamilyAuth, async (req, res) => {
   // Admin-only key authorization
   if (ADMIN_WRITE_KEYS.has(req.params.key)) {
     if (!req.memberId) return res.status(403).json({ error: "no member selected" });
@@ -554,14 +746,16 @@ app.put("/api/store/:key", requireFamilyAuth, (req, res) => {
   if (value === undefined) return res.status(400).json({ error: "missing value" });
   const now = new Date().toISOString();
   const nsKey = `${req.familyId}:${req.params.key}`;
+  const storeValue = typeof value === "string" ? value : JSON.stringify(value);
   db.prepare(
     "INSERT INTO stores (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-  ).run(nsKey, typeof value === "string" ? value : JSON.stringify(value), now);
+  ).run(nsKey, storeValue, now);
+  emitEvent(req.familyId, "stores", nsKey, "upsert", { key: nsKey, value: storeValue, updated_at: now });
   res.json({ ok: true });
 });
 
 // POST /api/store/sync — bulk upsert
-app.post("/api/store/sync", requireFamilyAuth, (req, res) => {
+app.post("/api/store/sync", requireFamilyAuth, async (req, res) => {
   const { stores } = req.body;
   if (!stores || typeof stores !== "object") return res.status(400).json({ error: "missing stores object" });
 
@@ -577,13 +771,19 @@ app.post("/api/store/sync", requireFamilyAuth, (req, res) => {
   const upsert = db.prepare(
     "INSERT INTO stores (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
   );
+  const eventData = [];
   const tx = db.transaction((entries) => {
     for (const [key, value] of entries) {
       const nsKey = `${req.familyId}:${key}`;
-      upsert.run(nsKey, typeof value === "string" ? value : JSON.stringify(value), now);
+      const storeValue = typeof value === "string" ? value : JSON.stringify(value);
+      upsert.run(nsKey, storeValue, now);
+      eventData.push({ nsKey, storeValue });
     }
   });
   tx(Object.entries(stores));
+  await Promise.all(eventData.map(({ nsKey, storeValue }) =>
+    emitEvent(req.familyId, "stores", nsKey, "upsert", { key: nsKey, value: storeValue, updated_at: now })
+  ));
   res.json({ ok: true, count: Object.keys(stores).length });
 });
 
@@ -887,7 +1087,7 @@ app.post("/api/auth/change-family-password", requireFamilyAuth, async (req, res)
 // --- Feedback ----------------------------------------------------------------
 
 // POST /api/feedback — submit feedback
-app.post("/api/feedback", requireFamilyAuth, (req, res) => {
+app.post("/api/feedback", requireFamilyAuth, async (req, res) => {
   const { text, userId, userName, currentView, userAgent } = req.body;
   if (!text || typeof text !== "string" || !text.trim()) return res.status(400).json({ error: "missing text" });
   const id = crypto.randomUUID().split("-")[0];
@@ -895,6 +1095,11 @@ app.post("/api/feedback", requireFamilyAuth, (req, res) => {
   db.prepare(
     "INSERT INTO feedback (id, family_id, text, user_id, user_name, current_view, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
   ).run(id, req.familyId, text.trim(), userId || null, userName || null, currentView || null, userAgent || null, createdAt);
+  emitEvent(req.familyId, "feedback", id, "insert", {
+    family_id: req.familyId, text: text.trim(), user_id: userId || null,
+    user_name: userName || null, current_view: currentView || null,
+    user_agent: userAgent || null, created_at: createdAt,
+  });
   res.json({ ok: true, id });
 });
 
@@ -905,12 +1110,13 @@ app.get("/api/feedback", requireFamilyAuth, (req, res) => {
 });
 
 // PATCH /api/feedback/:id — mark feedback completed/uncompleted with optional note
-app.patch("/api/feedback/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.patch("/api/feedback/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const { completed, note } = req.body;
   const completedAt = completed ? new Date().toISOString() : null;
   const resolutionNote = completed ? (note || null) : null;
   const result = db.prepare("UPDATE feedback SET completed_at = ?, resolution_note = ? WHERE id = ? AND family_id = ?").run(completedAt, resolutionNote, req.params.id, req.familyId);
   if (result.changes === 0) return res.status(404).json({ error: "not found" });
+  emitEvent(req.familyId, "feedback", req.params.id, "update", { completed_at: completedAt, resolution_note: resolutionNote });
   res.json({ ok: true });
 });
 
@@ -1186,21 +1392,38 @@ app.get("/api/tasks", requireFamilyAuth, (req, res) => {
   res.json(rows.map(taskRowToObj));
 });
 
-app.post("/api/tasks", requireFamilyAuth, requireAdmin, (req, res) => {
+app.post("/api/tasks", requireFamilyAuth, requireAdmin, async (req, res) => {
   const t = req.body;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const rowData = {
+    family_id: req.familyId, name: t.name || '', description: t.description || '',
+    recurrence: t.recurrence || 'daily',
+    available: (t.available ?? (t.recurrence === 'transient' ? false : true)) ? 1 : 0,
+    category: t.category || (t.recurrence === 'transient' ? 'jobboard' : 'routine'),
+    pay_type: t.payType || 'fixed', rewards: JSON.stringify(t.rewards || {}),
+    streak_bonus: t.streakBonus ? JSON.stringify(t.streakBonus) : null,
+    timer_bonus: t.timerBonus ? JSON.stringify(t.timerBonus) : null,
+    bonus_criteria: t.bonusCriteria ? JSON.stringify(t.bonusCriteria) : null,
+    assigned_users: JSON.stringify(t.assignedUsers || []),
+    required_tags: JSON.stringify(t.requiredTags || []),
+    active_days: JSON.stringify(t.activeDays || []),
+    multi_user: (t.multiUser ?? true) ? 1 : 0,
+    max_payout: t.maxPayout ? JSON.stringify(t.maxPayout) : null,
+    is_penalty: t.isPenalty ? 1 : 0, requires_approval: t.requiresApproval ? 1 : 0,
+    last_activated_at: t.lastActivatedAt || null, deadline: t.deadline || '',
+    archived: 0, created_at: now,
+  };
   db.prepare(`INSERT INTO tasks (id, family_id, name, description, recurrence, available, category, pay_type, rewards, streak_bonus, timer_bonus, bonus_criteria, assigned_users, required_tags, active_days, multi_user, max_payout, is_penalty, requires_approval, last_activated_at, deadline, archived, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, req.familyId, t.name || '', t.description || '', t.recurrence || 'daily',
-    (t.available ?? (t.recurrence === 'transient' ? false : true)) ? 1 : 0,
-    t.category || (t.recurrence === 'transient' ? 'jobboard' : 'routine'), t.payType || 'fixed',
-    JSON.stringify(t.rewards || {}), t.streakBonus ? JSON.stringify(t.streakBonus) : null,
-    t.timerBonus ? JSON.stringify(t.timerBonus) : null, t.bonusCriteria ? JSON.stringify(t.bonusCriteria) : null,
-    JSON.stringify(t.assignedUsers || []), JSON.stringify(t.requiredTags || []),
-    JSON.stringify(t.activeDays || []), (t.multiUser ?? true) ? 1 : 0,
-    t.maxPayout ? JSON.stringify(t.maxPayout) : null, t.isPenalty ? 1 : 0,
-    t.requiresApproval ? 1 : 0, t.lastActivatedAt || null, t.deadline || '', 0, now);
+  ).run(id, rowData.family_id, rowData.name, rowData.description, rowData.recurrence,
+    rowData.available, rowData.category, rowData.pay_type, rowData.rewards,
+    rowData.streak_bonus, rowData.timer_bonus, rowData.bonus_criteria,
+    rowData.assigned_users, rowData.required_tags, rowData.active_days,
+    rowData.multi_user, rowData.max_payout, rowData.is_penalty,
+    rowData.requires_approval, rowData.last_activated_at, rowData.deadline,
+    rowData.archived, rowData.created_at);
+  emitEvent(req.familyId, "tasks", id, "insert", rowData);
 
   const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
   const obj = taskRowToObj(row);
@@ -1208,30 +1431,50 @@ app.post("/api/tasks", requireFamilyAuth, requireAdmin, (req, res) => {
   res.json(obj);
 });
 
-app.put("/api/tasks/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.put("/api/tasks/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const t = req.body;
   const existing = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!existing) return res.status(404).json({ error: "not found" });
 
+  const updatedFields = {
+    name: t.name ?? existing.name, description: t.description ?? existing.description,
+    recurrence: t.recurrence ?? existing.recurrence,
+    available: (t.available !== undefined ? t.available : existing.available) ? 1 : 0,
+    category: t.category ?? existing.category, pay_type: t.payType ?? existing.pay_type,
+    rewards: t.rewards !== undefined ? JSON.stringify(t.rewards) : existing.rewards,
+    streak_bonus: t.streakBonus !== undefined ? (t.streakBonus ? JSON.stringify(t.streakBonus) : null) : existing.streak_bonus,
+    timer_bonus: t.timerBonus !== undefined ? (t.timerBonus ? JSON.stringify(t.timerBonus) : null) : existing.timer_bonus,
+    bonus_criteria: t.bonusCriteria !== undefined ? (t.bonusCriteria ? JSON.stringify(t.bonusCriteria) : null) : existing.bonus_criteria,
+    assigned_users: t.assignedUsers !== undefined ? JSON.stringify(t.assignedUsers) : existing.assigned_users,
+    required_tags: t.requiredTags !== undefined ? JSON.stringify(t.requiredTags) : existing.required_tags,
+    active_days: t.activeDays !== undefined ? JSON.stringify(t.activeDays) : existing.active_days,
+    multi_user: (t.multiUser !== undefined ? t.multiUser : existing.multi_user) ? 1 : 0,
+    max_payout: t.maxPayout !== undefined ? (t.maxPayout ? JSON.stringify(t.maxPayout) : null) : existing.max_payout,
+    is_penalty: (t.isPenalty !== undefined ? t.isPenalty : existing.is_penalty) ? 1 : 0,
+    requires_approval: (t.requiresApproval !== undefined ? t.requiresApproval : existing.requires_approval) ? 1 : 0,
+    last_activated_at: t.lastActivatedAt !== undefined ? t.lastActivatedAt : existing.last_activated_at,
+    deadline: t.deadline !== undefined ? (t.deadline || '') : existing.deadline,
+    archived: (t.archived !== undefined ? t.archived : existing.archived) ? 1 : 0,
+  };
   db.prepare(`UPDATE tasks SET name = ?, description = ?, recurrence = ?, available = ?, category = ?, pay_type = ?, rewards = ?, streak_bonus = ?, timer_bonus = ?, bonus_criteria = ?, assigned_users = ?, required_tags = ?, active_days = ?, multi_user = ?, max_payout = ?, is_penalty = ?, requires_approval = ?, last_activated_at = ?, deadline = ?, archived = ? WHERE id = ? AND family_id = ?`
-  ).run(t.name ?? existing.name, t.description ?? existing.description, t.recurrence ?? existing.recurrence,
-    (t.available !== undefined ? t.available : existing.available) ? 1 : 0,
-    t.category ?? existing.category, t.payType ?? existing.pay_type,
-    t.rewards !== undefined ? JSON.stringify(t.rewards) : existing.rewards,
-    t.streakBonus !== undefined ? (t.streakBonus ? JSON.stringify(t.streakBonus) : null) : existing.streak_bonus,
-    t.timerBonus !== undefined ? (t.timerBonus ? JSON.stringify(t.timerBonus) : null) : existing.timer_bonus,
-    t.bonusCriteria !== undefined ? (t.bonusCriteria ? JSON.stringify(t.bonusCriteria) : null) : existing.bonus_criteria,
-    t.assignedUsers !== undefined ? JSON.stringify(t.assignedUsers) : existing.assigned_users,
-    t.requiredTags !== undefined ? JSON.stringify(t.requiredTags) : existing.required_tags,
-    t.activeDays !== undefined ? JSON.stringify(t.activeDays) : existing.active_days,
-    (t.multiUser !== undefined ? t.multiUser : existing.multi_user) ? 1 : 0,
-    t.maxPayout !== undefined ? (t.maxPayout ? JSON.stringify(t.maxPayout) : null) : existing.max_payout,
-    (t.isPenalty !== undefined ? t.isPenalty : existing.is_penalty) ? 1 : 0,
-    (t.requiresApproval !== undefined ? t.requiresApproval : existing.requires_approval) ? 1 : 0,
-    t.lastActivatedAt !== undefined ? t.lastActivatedAt : existing.last_activated_at,
-    t.deadline !== undefined ? (t.deadline || '') : existing.deadline,
-    (t.archived !== undefined ? t.archived : existing.archived) ? 1 : 0,
-    req.params.id, req.familyId);
+  ).run(updatedFields.name, updatedFields.description, updatedFields.recurrence,
+    updatedFields.available, updatedFields.category, updatedFields.pay_type,
+    updatedFields.rewards, updatedFields.streak_bonus, updatedFields.timer_bonus,
+    updatedFields.bonus_criteria, updatedFields.assigned_users, updatedFields.required_tags,
+    updatedFields.active_days, updatedFields.multi_user, updatedFields.max_payout,
+    updatedFields.is_penalty, updatedFields.requires_approval, updatedFields.last_activated_at,
+    updatedFields.deadline, updatedFields.archived, req.params.id, req.familyId);
+  emitEvent(req.familyId, "tasks", req.params.id, "update", updatedFields);
+
+  // When lastActivatedAt changes (task reactivation), clear old job claims
+  if (t.lastActivatedAt !== undefined && t.lastActivatedAt !== existing.last_activated_at) {
+    const claims = db.prepare("SELECT id FROM job_claims WHERE family_id = ? AND task_id = ?").all(req.familyId, req.params.id);
+    const deleted = db.prepare("DELETE FROM job_claims WHERE family_id = ? AND task_id = ?").run(req.familyId, req.params.id);
+    if (deleted.changes > 0) {
+      for (const c of claims) emitEvent(req.familyId, "job_claims", c.id, "delete");
+      broadcastSSE(req.familyId, "jobclaims:changed", {});
+    }
+  }
 
   const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(req.params.id);
   const obj = taskRowToObj(row);
@@ -1239,9 +1482,10 @@ app.put("/api/tasks/:id", requireFamilyAuth, requireAdmin, (req, res) => {
   res.json(obj);
 });
 
-app.delete("/api/tasks/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.delete("/api/tasks/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const result = db.prepare("UPDATE tasks SET archived = 1 WHERE id = ? AND family_id = ?").run(req.params.id, req.familyId);
   if (result.changes === 0) return res.status(404).json({ error: "not found" });
+  emitEvent(req.familyId, "tasks", req.params.id, "update", { archived: 1 });
   broadcastSSE(req.familyId, "task:updated", { id: req.params.id, archived: true });
   res.json({ ok: true });
 });
@@ -1261,12 +1505,14 @@ app.get("/api/users", requireFamilyAuth, (req, res) => {
   res.json(users);
 });
 
-app.post("/api/users", requireFamilyAuth, requireAdmin, (req, res) => {
+app.post("/api/users", requireFamilyAuth, requireAdmin, async (req, res) => {
   const u = req.body;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const rowData = { family_id: req.familyId, name: u.name || '', role: u.role || 'kid', avatar: u.avatar || '', tags: JSON.stringify(u.tags || []), created_at: now };
   db.prepare("INSERT INTO users (id, family_id, name, role, avatar, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(id, req.familyId, u.name || '', u.role || 'kid', u.avatar || '', JSON.stringify(u.tags || []), now);
+    .run(id, rowData.family_id, rowData.name, rowData.role, rowData.avatar, rowData.tags, rowData.created_at);
+  emitEvent(req.familyId, "users", id, "insert", rowData);
   const row = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
   const obj = userRowToObj(row);
   obj.balances = {};
@@ -1274,22 +1520,27 @@ app.post("/api/users", requireFamilyAuth, requireAdmin, (req, res) => {
   res.json(obj);
 });
 
-app.put("/api/users/:id", requireFamilyAuth, (req, res) => {
+app.put("/api/users/:id", requireFamilyAuth, async (req, res) => {
   const u = req.body;
   const existing = db.prepare("SELECT * FROM users WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!existing) return res.status(404).json({ error: "not found" });
+  const updatedFields = {
+    name: u.name ?? existing.name, role: u.role ?? existing.role,
+    avatar: u.avatar ?? existing.avatar, tags: u.tags !== undefined ? JSON.stringify(u.tags) : existing.tags,
+  };
   db.prepare("UPDATE users SET name = ?, role = ?, avatar = ?, tags = ? WHERE id = ? AND family_id = ?")
-    .run(u.name ?? existing.name, u.role ?? existing.role, u.avatar ?? existing.avatar,
-      u.tags !== undefined ? JSON.stringify(u.tags) : existing.tags, req.params.id, req.familyId);
+    .run(updatedFields.name, updatedFields.role, updatedFields.avatar, updatedFields.tags, req.params.id, req.familyId);
+  emitEvent(req.familyId, "users", req.params.id, "update", updatedFields);
   const row = db.prepare("SELECT * FROM users WHERE id = ?").get(req.params.id);
   const obj = userRowToObj(row);
   broadcastSSE(req.familyId, "user:updated", obj);
   res.json(obj);
 });
 
-app.delete("/api/users/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.delete("/api/users/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const result = db.prepare("DELETE FROM users WHERE id = ? AND family_id = ?").run(req.params.id, req.familyId);
   if (result.changes === 0) return res.status(404).json({ error: "not found" });
+  emitEvent(req.familyId, "users", req.params.id, "delete");
   broadcastSSE(req.familyId, "user:deleted", { id: req.params.id });
   res.json({ ok: true });
 });
@@ -1299,34 +1550,41 @@ app.get("/api/currencies", requireFamilyAuth, (req, res) => {
   res.json(db.prepare("SELECT * FROM currencies WHERE family_id = ?").all(req.familyId).map(currencyRowToObj));
 });
 
-app.post("/api/currencies", requireFamilyAuth, requireAdmin, (req, res) => {
+app.post("/api/currencies", requireFamilyAuth, requireAdmin, async (req, res) => {
   const c = req.body;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const rowData = { family_id: req.familyId, name: c.name || '', symbol: c.symbol || '', decimals: c.decimals ?? 0, color: c.color || '#66d9ef', created_at: now };
   db.prepare("INSERT INTO currencies (id, family_id, name, symbol, decimals, color, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(id, req.familyId, c.name || '', c.symbol || '', c.decimals ?? 0, c.color || '#66d9ef', now);
+    .run(id, rowData.family_id, rowData.name, rowData.symbol, rowData.decimals, rowData.color, rowData.created_at);
+  emitEvent(req.familyId, "currencies", id, "insert", rowData);
   const row = db.prepare("SELECT * FROM currencies WHERE id = ?").get(id);
   const obj = currencyRowToObj(row);
   broadcastSSE(req.familyId, "currency:created", obj);
   res.json(obj);
 });
 
-app.put("/api/currencies/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.put("/api/currencies/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const c = req.body;
   const existing = db.prepare("SELECT * FROM currencies WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!existing) return res.status(404).json({ error: "not found" });
+  const updatedFields = {
+    name: c.name ?? existing.name, symbol: c.symbol ?? existing.symbol,
+    decimals: c.decimals ?? existing.decimals, color: c.color ?? existing.color,
+  };
   db.prepare("UPDATE currencies SET name = ?, symbol = ?, decimals = ?, color = ? WHERE id = ? AND family_id = ?")
-    .run(c.name ?? existing.name, c.symbol ?? existing.symbol, c.decimals ?? existing.decimals,
-      c.color ?? existing.color, req.params.id, req.familyId);
+    .run(updatedFields.name, updatedFields.symbol, updatedFields.decimals, updatedFields.color, req.params.id, req.familyId);
+  emitEvent(req.familyId, "currencies", req.params.id, "update", updatedFields);
   const row = db.prepare("SELECT * FROM currencies WHERE id = ?").get(req.params.id);
   const obj = currencyRowToObj(row);
   broadcastSSE(req.familyId, "currency:updated", obj);
   res.json(obj);
 });
 
-app.delete("/api/currencies/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.delete("/api/currencies/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const result = db.prepare("DELETE FROM currencies WHERE id = ? AND family_id = ?").run(req.params.id, req.familyId);
   if (result.changes === 0) return res.status(404).json({ error: "not found" });
+  emitEvent(req.familyId, "currencies", req.params.id, "delete");
   broadcastSSE(req.familyId, "currency:deleted", { id: req.params.id });
   res.json({ ok: true });
 });
@@ -1336,36 +1594,42 @@ app.get("/api/shop-items", requireFamilyAuth, (req, res) => {
   res.json(db.prepare("SELECT * FROM shop_items WHERE family_id = ?").all(req.familyId).map(shopItemRowToObj));
 });
 
-app.post("/api/shop-items", requireFamilyAuth, requireAdmin, (req, res) => {
+app.post("/api/shop-items", requireFamilyAuth, requireAdmin, async (req, res) => {
   const s = req.body;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const rowData = { family_id: req.familyId, name: s.name || '', description: s.description || '', costs: JSON.stringify(s.costs || {}), archived: 0, created_at: now };
   db.prepare("INSERT INTO shop_items (id, family_id, name, description, costs, archived, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)")
-    .run(id, req.familyId, s.name || '', s.description || '', JSON.stringify(s.costs || {}), now);
+    .run(id, rowData.family_id, rowData.name, rowData.description, rowData.costs, rowData.created_at);
+  emitEvent(req.familyId, "shop_items", id, "insert", rowData);
   const row = db.prepare("SELECT * FROM shop_items WHERE id = ?").get(id);
   const obj = shopItemRowToObj(row);
   broadcastSSE(req.familyId, "shop:created", obj);
   res.json(obj);
 });
 
-app.put("/api/shop-items/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.put("/api/shop-items/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const s = req.body;
   const existing = db.prepare("SELECT * FROM shop_items WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!existing) return res.status(404).json({ error: "not found" });
+  const updatedFields = {
+    name: s.name ?? existing.name, description: s.description ?? existing.description,
+    costs: s.costs !== undefined ? JSON.stringify(s.costs) : existing.costs,
+    archived: (s.archived !== undefined ? s.archived : existing.archived) ? 1 : 0,
+  };
   db.prepare("UPDATE shop_items SET name = ?, description = ?, costs = ?, archived = ? WHERE id = ? AND family_id = ?")
-    .run(s.name ?? existing.name, s.description ?? existing.description,
-      s.costs !== undefined ? JSON.stringify(s.costs) : existing.costs,
-      (s.archived !== undefined ? s.archived : existing.archived) ? 1 : 0,
-      req.params.id, req.familyId);
+    .run(updatedFields.name, updatedFields.description, updatedFields.costs, updatedFields.archived, req.params.id, req.familyId);
+  emitEvent(req.familyId, "shop_items", req.params.id, "update", updatedFields);
   const row = db.prepare("SELECT * FROM shop_items WHERE id = ?").get(req.params.id);
   const obj = shopItemRowToObj(row);
   broadcastSSE(req.familyId, "shop:updated", obj);
   res.json(obj);
 });
 
-app.delete("/api/shop-items/:id", requireFamilyAuth, requireAdmin, (req, res) => {
+app.delete("/api/shop-items/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
   const result = db.prepare("UPDATE shop_items SET archived = 1 WHERE id = ? AND family_id = ?").run(req.params.id, req.familyId);
   if (result.changes === 0) return res.status(404).json({ error: "not found" });
+  emitEvent(req.familyId, "shop_items", req.params.id, "update", { archived: 1 });
   broadcastSSE(req.familyId, "shop:updated", { id: req.params.id, archived: true });
   res.json({ ok: true });
 });
@@ -1399,7 +1663,7 @@ app.get("/api/completions", requireFamilyAuth, (req, res) => {
 });
 
 // POST /api/completions — kid completes a task; server computes rewards
-app.post("/api/completions", requireFamilyAuth, (req, res) => {
+app.post("/api/completions", requireFamilyAuth, async (req, res) => {
   const { taskId, userId, timerSeconds, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
 
@@ -1450,9 +1714,16 @@ app.post("/api/completions", requireFamilyAuth, (req, res) => {
   const id = crypto.randomUUID();
   const completedAt = new Date().toISOString();
 
+  const completionData = {
+    family_id: req.familyId, task_id: taskId, user_id: userId, status, completed_at: completedAt,
+    rewards: JSON.stringify(rewards), timer_seconds: timerSeconds ?? null,
+    streak_count: newStreak, streak_multiplier: streakMultiplier, timer_multiplier: timerMultiplier,
+    note: '', is_penalty: 0, is_hourly: 0, total_seconds: null, worklog: null, _client_id: _clientId || null,
+  };
   db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, rewards, timer_seconds, streak_count, streak_multiplier, timer_multiplier, note, is_penalty, is_hourly, total_seconds, worklog, _client_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, NULL, NULL, ?)`)
     .run(id, req.familyId, taskId, userId, status, completedAt, JSON.stringify(rewards), timerSeconds ?? null, newStreak, streakMultiplier, timerMultiplier, _clientId || null);
+  emitEvent(req.familyId, "completions", id, "insert", completionData);
 
   if (status === "approved") {
     creditRewardsServer(req.familyId, userId, rewards);
@@ -1468,7 +1739,7 @@ app.post("/api/completions", requireFamilyAuth, (req, res) => {
 });
 
 // POST /api/completions/penalty — admin logs a penalty
-app.post("/api/completions/penalty", requireFamilyAuth, requireAdmin, (req, res) => {
+app.post("/api/completions/penalty", requireFamilyAuth, requireAdmin, async (req, res) => {
   const { taskId, userId, note } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
 
@@ -1483,6 +1754,13 @@ app.post("/api/completions/penalty", requireFamilyAuth, requireAdmin, (req, res)
     VALUES (?, ?, ?, ?, 'approved', ?, ?, NULL, 0, 1, 1, ?, 1)`)
     .run(id, req.familyId, taskId, userId, completedAt, JSON.stringify(rewards), note || '');
 
+  emitEvent(req.familyId, "completions", id, "insert", {
+    family_id: req.familyId, task_id: taskId, user_id: userId, status: 'approved',
+    completed_at: completedAt, rewards: JSON.stringify(rewards), timer_seconds: null,
+    streak_count: 0, streak_multiplier: 1, timer_multiplier: 1, note: note || '',
+    is_penalty: 1
+  });
+
   creditRewardsServer(req.familyId, userId, rewards);
 
   const row = db.prepare("SELECT * FROM completions WHERE id = ?").get(id);
@@ -1493,7 +1771,7 @@ app.post("/api/completions/penalty", requireFamilyAuth, requireAdmin, (req, res)
 });
 
 // POST /api/completions/hourly — submit hourly work
-app.post("/api/completions/hourly", requireFamilyAuth, (req, res) => {
+app.post("/api/completions/hourly", requireFamilyAuth, async (req, res) => {
   const { taskId, userId, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
 
@@ -1543,6 +1821,10 @@ app.post("/api/completions/hourly", requireFamilyAuth, (req, res) => {
     VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, 1, 1, '', 1, ?, ?, ?)`)
     .run(id, req.familyId, taskId, userId, completedAt, JSON.stringify(rewards), totalSecs, JSON.stringify(worklog), _clientId || null);
 
+  // Capture IDs before bulk updates/deletes for event emission
+  const affectedClaim = db.prepare("SELECT id FROM job_claims WHERE family_id = ? AND task_id = ? AND user_id = ? AND status != 'submitted'").get(req.familyId, taskId, userId);
+  const worklogIds = db.prepare("SELECT id FROM worklog_entries WHERE family_id = ? AND task_id = ? AND user_id = ?").all(req.familyId, taskId, userId).map(r => r.id);
+
   // Mark job claim as submitted
   db.prepare("UPDATE job_claims SET status = 'submitted' WHERE family_id = ? AND task_id = ? AND user_id = ?")
     .run(req.familyId, taskId, userId);
@@ -1550,6 +1832,19 @@ app.post("/api/completions/hourly", requireFamilyAuth, (req, res) => {
   // Clear worklog entries for this task+user
   db.prepare("DELETE FROM worklog_entries WHERE family_id = ? AND task_id = ? AND user_id = ?")
     .run(req.familyId, taskId, userId);
+
+  emitEvent(req.familyId, "completions", id, "insert", {
+    family_id: req.familyId, task_id: taskId, user_id: userId, status: 'pending',
+    completed_at: completedAt, rewards: JSON.stringify(rewards), streak_count: 0,
+    streak_multiplier: 1, timer_multiplier: 1, note: '', is_hourly: 1,
+    total_seconds: totalSecs, worklog: JSON.stringify(worklog), _client_id: _clientId || null
+  });
+  if (affectedClaim) {
+    emitEvent(req.familyId, "job_claims", affectedClaim.id, "update", { status: 'submitted' });
+  }
+  for (const wId of worklogIds) {
+    emitEvent(req.familyId, "worklog_entries", wId, "delete");
+  }
 
   const row = db.prepare("SELECT * FROM completions WHERE id = ?").get(id);
   const obj = completionRowToObj(row);
@@ -1559,7 +1854,7 @@ app.post("/api/completions/hourly", requireFamilyAuth, (req, res) => {
 });
 
 // PATCH /api/completions/:id/approve
-app.patch("/api/completions/:id/approve", requireFamilyAuth, requireAdmin, (req, res) => {
+app.patch("/api/completions/:id/approve", requireFamilyAuth, requireAdmin, async (req, res) => {
   const c = db.prepare("SELECT * FROM completions WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!c) return res.status(404).json({ error: "not found" });
   if (c.status !== "pending") return res.status(400).json({ error: "not pending" });
@@ -1588,6 +1883,12 @@ app.patch("/api/completions/:id/approve", requireFamilyAuth, requireAdmin, (req,
   db.prepare(`UPDATE completions SET status = 'approved', approved_at = ?, rewards = ?, bonus_criteria_checked = ?, bonus_criteria_multiplier = ? WHERE id = ?`)
     .run(approvedAt, JSON.stringify(rewards), checkedCriteria.length > 0 ? JSON.stringify(checkedCriteria) : null, criteriaMultiplier !== 1 ? criteriaMultiplier : null, req.params.id);
 
+  emitEvent(req.familyId, "completions", req.params.id, "update", {
+    status: 'approved', approved_at: approvedAt, rewards: JSON.stringify(rewards),
+    bonus_criteria_checked: checkedCriteria.length > 0 ? JSON.stringify(checkedCriteria) : null,
+    bonus_criteria_multiplier: criteriaMultiplier !== 1 ? criteriaMultiplier : null
+  });
+
   creditRewardsServer(req.familyId, c.user_id, rewards);
 
   const row = db.prepare("SELECT * FROM completions WHERE id = ?").get(req.params.id);
@@ -1598,7 +1899,7 @@ app.patch("/api/completions/:id/approve", requireFamilyAuth, requireAdmin, (req,
 });
 
 // PATCH /api/completions/:id/reject
-app.patch("/api/completions/:id/reject", requireFamilyAuth, requireAdmin, (req, res) => {
+app.patch("/api/completions/:id/reject", requireFamilyAuth, requireAdmin, async (req, res) => {
   const c = db.prepare("SELECT * FROM completions WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!c) return res.status(404).json({ error: "not found" });
   if (c.status !== "pending") return res.status(400).json({ error: "not pending" });
@@ -1607,6 +1908,10 @@ app.patch("/api/completions/:id/reject", requireFamilyAuth, requireAdmin, (req, 
   db.prepare("UPDATE completions SET status = 'rejected', rejected_at = ?, rejection_note = ? WHERE id = ?")
     .run(rejectedAt, req.body.note || null, req.params.id);
 
+  emitEvent(req.familyId, "completions", req.params.id, "update", {
+    status: 'rejected', rejected_at: rejectedAt, rejection_note: req.body.note || null
+  });
+
   const row = db.prepare("SELECT * FROM completions WHERE id = ?").get(req.params.id);
   const obj = completionRowToObj(row);
   broadcastSSE(req.familyId, "completion:rejected", obj);
@@ -1614,7 +1919,7 @@ app.patch("/api/completions/:id/reject", requireFamilyAuth, requireAdmin, (req, 
 });
 
 // DELETE /api/completions/reset-daily — admin: reset a user's daily completions for today
-app.delete("/api/completions/reset-daily", requireFamilyAuth, requireAdmin, (req, res) => {
+app.delete("/api/completions/reset-daily", requireFamilyAuth, requireAdmin, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "userId required" });
 
@@ -1642,6 +1947,7 @@ app.delete("/api/completions/reset-daily", requireFamilyAuth, requireAdmin, (req
   }
 
   if (toRemove.length > 0) {
+    toRemove.forEach(c => emitEvent(req.familyId, "completions", c.id, "delete"));
     broadcastSSE(req.familyId, "completions:reset", { userId });
     broadcastSSE(req.familyId, "balances:changed", { userId });
   }
@@ -1654,7 +1960,7 @@ app.get("/api/redemptions", requireFamilyAuth, (req, res) => {
   res.json(db.prepare("SELECT * FROM redemptions WHERE family_id = ?").all(req.familyId).map(redemptionRowToObj));
 });
 
-app.post("/api/redemptions", requireFamilyAuth, (req, res) => {
+app.post("/api/redemptions", requireFamilyAuth, async (req, res) => {
   const { shopItemId, userId, _clientId } = req.body;
   if (!shopItemId || !userId) return res.status(400).json({ error: "shopItemId and userId required" });
 
@@ -1688,6 +1994,12 @@ app.post("/api/redemptions", requireFamilyAuth, (req, res) => {
   db.prepare("INSERT INTO redemptions (id, family_id, shop_item_id, user_id, costs, purchased_at, fulfilled, _client_id) VALUES (?, ?, ?, ?, ?, ?, 0, ?)")
     .run(id, req.familyId, shopItemId, userId, JSON.stringify(costs), purchasedAt, _clientId || null);
 
+  emitEvent(req.familyId, "redemptions", id, "insert", {
+    family_id: req.familyId, shop_item_id: shopItemId, user_id: userId,
+    costs: JSON.stringify(costs), purchased_at: purchasedAt, fulfilled: 0,
+    _client_id: _clientId || null
+  });
+
   const row = db.prepare("SELECT * FROM redemptions WHERE id = ?").get(id);
   const obj = redemptionRowToObj(row);
   broadcastSSE(req.familyId, "redemption:added", obj);
@@ -1695,10 +2007,12 @@ app.post("/api/redemptions", requireFamilyAuth, (req, res) => {
   res.json({ ok: true, redemption: obj });
 });
 
-app.patch("/api/redemptions/:id/fulfill", requireFamilyAuth, requireAdmin, (req, res) => {
+app.patch("/api/redemptions/:id/fulfill", requireFamilyAuth, requireAdmin, async (req, res) => {
   const r = db.prepare("SELECT * FROM redemptions WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!r) return res.status(404).json({ error: "not found" });
-  db.prepare("UPDATE redemptions SET fulfilled = 1, fulfilled_at = ? WHERE id = ?").run(new Date().toISOString(), req.params.id);
+  const fulfilledAt = new Date().toISOString();
+  db.prepare("UPDATE redemptions SET fulfilled = 1, fulfilled_at = ? WHERE id = ?").run(fulfilledAt, req.params.id);
+  emitEvent(req.familyId, "redemptions", req.params.id, "update", { fulfilled: 1, fulfilled_at: fulfilledAt });
   const row = db.prepare("SELECT * FROM redemptions WHERE id = ?").get(req.params.id);
   const obj = redemptionRowToObj(row);
   broadcastSSE(req.familyId, "redemption:fulfilled", obj);
@@ -1707,7 +2021,7 @@ app.patch("/api/redemptions/:id/fulfill", requireFamilyAuth, requireAdmin, (req,
 
 // --- Typed API: Balance adjustments ------------------------------------------
 
-app.post("/api/balance-adjustments", requireFamilyAuth, requireAdmin, (req, res) => {
+app.post("/api/balance-adjustments", requireFamilyAuth, requireAdmin, async (req, res) => {
   const { userId, currencyId, delta, note } = req.body;
   if (!userId || !currencyId || delta === undefined) return res.status(400).json({ error: "userId, currencyId, and delta required" });
 
@@ -1715,6 +2029,11 @@ app.post("/api/balance-adjustments", requireFamilyAuth, requireAdmin, (req, res)
   const createdAt = new Date().toISOString();
   db.prepare("INSERT INTO balance_adjustments (id, family_id, user_id, currency_id, delta, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .run(id, req.familyId, userId, currencyId, delta, note || '', createdAt);
+
+  emitEvent(req.familyId, "balance_adjustments", id, "insert", {
+    family_id: req.familyId, user_id: userId, currency_id: currencyId,
+    delta, note: note || '', created_at: createdAt
+  });
 
   adjustCachedBalance(req.familyId, userId, currencyId, delta);
   broadcastSSE(req.familyId, "balances:changed", { userId });
@@ -1727,7 +2046,7 @@ app.get("/api/job-claims", requireFamilyAuth, (req, res) => {
   res.json(db.prepare("SELECT * FROM job_claims WHERE family_id = ?").all(req.familyId).map(jobClaimRowToObj));
 });
 
-app.post("/api/job-claims", requireFamilyAuth, (req, res) => {
+app.post("/api/job-claims", requireFamilyAuth, async (req, res) => {
   const { taskId, userId, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
 
@@ -1755,17 +2074,23 @@ app.post("/api/job-claims", requireFamilyAuth, (req, res) => {
   db.prepare("INSERT INTO job_claims (id, family_id, task_id, user_id, status, accepted_at, _client_id) VALUES (?, ?, ?, ?, 'active', ?, ?)")
     .run(id, req.familyId, taskId, userId, acceptedAt, _clientId || null);
 
+  emitEvent(req.familyId, "job_claims", id, "insert", {
+    family_id: req.familyId, task_id: taskId, user_id: userId,
+    status: 'active', accepted_at: acceptedAt, _client_id: _clientId || null
+  });
+
   const row = db.prepare("SELECT * FROM job_claims WHERE id = ?").get(id);
   const obj = jobClaimRowToObj(row);
   broadcastSSE(req.familyId, "jobclaims:changed", obj);
   res.json(obj);
 });
 
-app.patch("/api/job-claims/:id/submit", requireFamilyAuth, (req, res) => {
+app.patch("/api/job-claims/:id/submit", requireFamilyAuth, async (req, res) => {
   const claim = db.prepare("SELECT * FROM job_claims WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!claim) return res.status(404).json({ error: "not found" });
 
   db.prepare("UPDATE job_claims SET status = 'submitted' WHERE id = ?").run(req.params.id);
+  emitEvent(req.familyId, "job_claims", req.params.id, "update", { status: 'submitted' });
   const row = db.prepare("SELECT * FROM job_claims WHERE id = ?").get(req.params.id);
   const obj = jobClaimRowToObj(row);
   broadcastSSE(req.familyId, "jobclaims:changed", obj);
@@ -1783,7 +2108,7 @@ app.get("/api/worklog", requireFamilyAuth, (req, res) => {
   res.json(db.prepare(sql).all(...params).map(worklogRowToObj));
 });
 
-app.post("/api/worklog", requireFamilyAuth, (req, res) => {
+app.post("/api/worklog", requireFamilyAuth, async (req, res) => {
   const { taskId, userId, _clientId } = req.body;
   if (!taskId || !userId) return res.status(400).json({ error: "taskId and userId required" });
 
@@ -1802,13 +2127,18 @@ app.post("/api/worklog", requireFamilyAuth, (req, res) => {
   db.prepare("INSERT INTO worklog_entries (id, family_id, task_id, user_id, clock_in, _client_id) VALUES (?, ?, ?, ?, ?, ?)")
     .run(id, req.familyId, taskId, userId, clockIn, _clientId || null);
 
+  emitEvent(req.familyId, "worklog_entries", id, "insert", {
+    family_id: req.familyId, task_id: taskId, user_id: userId,
+    clock_in: clockIn, _client_id: _clientId || null
+  });
+
   const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(id);
   const obj = worklogRowToObj(row);
   broadcastSSE(req.familyId, "worklog:changed", obj);
   res.json(obj);
 });
 
-app.patch("/api/worklog/:id/clock-out", requireFamilyAuth, (req, res) => {
+app.patch("/api/worklog/:id/clock-out", requireFamilyAuth, async (req, res) => {
   const entry = db.prepare("SELECT * FROM worklog_entries WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!entry) return res.status(404).json({ error: "not found" });
   if (entry.clock_out) return res.status(400).json({ error: "already clocked out" });
@@ -1816,13 +2146,15 @@ app.patch("/api/worklog/:id/clock-out", requireFamilyAuth, (req, res) => {
   const clockOut = new Date().toISOString();
   db.prepare("UPDATE worklog_entries SET clock_out = ? WHERE id = ?").run(clockOut, req.params.id);
 
+  emitEvent(req.familyId, "worklog_entries", req.params.id, "update", { clock_out: clockOut });
+
   const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(req.params.id);
   const obj = worklogRowToObj(row);
   broadcastSSE(req.familyId, "worklog:changed", obj);
   res.json(obj);
 });
 
-app.patch("/api/worklog/:id/pause", requireFamilyAuth, (req, res) => {
+app.patch("/api/worklog/:id/pause", requireFamilyAuth, async (req, res) => {
   const entry = db.prepare("SELECT * FROM worklog_entries WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!entry) return res.status(404).json({ error: "not found" });
   if (entry.clock_out) return res.status(400).json({ error: "already clocked out" });
@@ -1833,13 +2165,17 @@ app.patch("/api/worklog/:id/pause", requireFamilyAuth, (req, res) => {
   db.prepare("UPDATE worklog_entries SET paused_at = ?, elapsed_before_pause = ? WHERE id = ?")
     .run(now.toISOString(), elapsed, req.params.id);
 
+  emitEvent(req.familyId, "worklog_entries", req.params.id, "update", {
+    paused_at: now.toISOString(), elapsed_before_pause: elapsed
+  });
+
   const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(req.params.id);
   const obj = worklogRowToObj(row);
   broadcastSSE(req.familyId, "worklog:changed", obj);
   res.json(obj);
 });
 
-app.patch("/api/worklog/:id/resume", requireFamilyAuth, (req, res) => {
+app.patch("/api/worklog/:id/resume", requireFamilyAuth, async (req, res) => {
   const entry = db.prepare("SELECT * FROM worklog_entries WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
   if (!entry) return res.status(404).json({ error: "not found" });
   if (entry.clock_out) return res.status(400).json({ error: "already clocked out" });
@@ -1848,6 +2184,10 @@ app.patch("/api/worklog/:id/resume", requireFamilyAuth, (req, res) => {
   const now = new Date().toISOString();
   db.prepare("UPDATE worklog_entries SET clock_in = ?, paused_at = NULL WHERE id = ?")
     .run(now, req.params.id);
+
+  emitEvent(req.familyId, "worklog_entries", req.params.id, "update", {
+    clock_in: now, paused_at: null
+  });
 
   const row = db.prepare("SELECT * FROM worklog_entries WHERE id = ?").get(req.params.id);
   const obj = worklogRowToObj(row);
@@ -2005,78 +2345,46 @@ if (SYNC_PEERS.length > 0 && SYNC_SECRET) {
   console.log(`Sync: will sync with ${SYNC_PEERS.join(", ")} every ${SYNC_INTERVAL_MS / 1000}s`);
 }
 
-// --- Backups (S3) ------------------------------------------------------------
+// --- Backups -----------------------------------------------------------------
 
-const LOCAL_BACKUP_DIR = path.join(__dirname, "backups");
-fs.mkdirSync(LOCAL_BACKUP_DIR, { recursive: true });
-
+/**
+ * Create a backup: write per-family snapshots locally (event log + snapshot.json),
+ * then sync to S3 if configured.
+ */
 async function createBackup() {
-  const timestamp = new Date().toISOString().replace(/:/g, "-").replace(/\.\d+Z$/, "");
-  const filename = `parentslop-${timestamp}.db`;
-  const localDest = path.join(LOCAL_BACKUP_DIR, filename);
-  await db.backup(localDest);
-  try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch (e) { console.warn("WAL checkpoint warning:", e.message); }
+  // 1. Write local per-family snapshots (these live alongside the event logs)
+  writeAllSnapshots();
 
-  // Upload to S3 if configured
-  if (s3) {
+  // 2. Upload event logs + snapshots to S3 (off-site backup)
+  if (eventLog.s3Enabled()) {
     try {
-      const body = fs.readFileSync(localDest);
-      await s3.send(new PutObjectCommand({ Bucket: BACKUP_BUCKET, Key: `backups/${filename}`, Body: body }));
-      console.log(`Backup uploaded to S3: ${filename}`);
+      await eventLog.backupAllToS3();
     } catch (e) {
-      console.error(`S3 upload failed: ${e.message} (local backup kept at ${localDest})`);
-      return filename;
+      console.error(`S3 backup failed: ${e.message}`);
     }
   }
 
-  // Clean up local file (S3 is the durable copy)
-  try { fs.unlinkSync(localDest); } catch {}
-
-  // Rotate S3 backups: keep last 30
-  if (s3) {
-    try {
-      const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
-      const sorted = (list.Contents || []).sort((a, b) => b.LastModified - a.LastModified);
-      for (const old of sorted.slice(30)) {
-        await s3.send(new DeleteObjectCommand({ Bucket: BACKUP_BUCKET, Key: old.Key }));
-        console.log(`S3 backup rotated: ${old.Key}`);
-      }
-    } catch (e) {
-      console.warn("S3 rotation warning:", e.message);
-    }
-  }
-
-  console.log(`Backup created: ${filename}`);
-  return filename;
+  console.log("Backup complete");
+  return "ok";
 }
 
 async function listBackups() {
-  if (s3) {
-    try {
-      const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
-      return (list.Contents || [])
-        .sort((a, b) => b.LastModified - a.LastModified)
-        .map(o => ({ filename: o.Key.replace("backups/", ""), size: o.Size, created: o.LastModified.toISOString() }));
-    } catch (e) {
-      console.error("S3 list failed:", e.message);
-    }
-  }
-  // Fallback to local
-  if (!fs.existsSync(LOCAL_BACKUP_DIR)) return [];
-  return fs.readdirSync(LOCAL_BACKUP_DIR)
-    .filter(f => f.startsWith("parentslop-") && f.endsWith(".db"))
-    .map(f => {
-      const stat = fs.statSync(path.join(LOCAL_BACKUP_DIR, f));
-      return { filename: f, size: stat.size, created: stat.mtime.toISOString() };
-    })
-    .sort((a, b) => b.created.localeCompare(a.created));
+  // List per-family snapshot info from local data
+  const familyIds = eventLog.listFamilyIds();
+  return familyIds.map(fid => {
+    const snap = eventLog.readLocalSnapshot(fid);
+    return {
+      familyId: fid,
+      snapshot: snap ? { created: snap.created_at, lastEventId: snap.last_event_id } : null,
+    };
+  });
 }
 
 // POST /api/backup — trigger a backup
 app.post("/api/backup", requireFamilyAuth, requireAdmin, async (req, res) => {
   try {
-    const filename = await createBackup();
-    res.json({ ok: true, filename });
+    await createBackup();
+    res.json({ ok: true });
   } catch (err) {
     console.error("Backup failed:", err);
     res.status(500).json({ error: "backup failed" });
@@ -2317,15 +2625,27 @@ app.use((err, req, res, _next) => {
 
 // --- Start -------------------------------------------------------------------
 
+// Initialize event log module (must happen before startup)
+// DATA_DIR holds all per-family data (events + snapshots). Defaults to ./data
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+eventLog.init({ s3Client: s3, bucket: BACKUP_BUCKET, dir: DATA_DIR });
+
 ensureHealthyDb().then(() => {
+  recoverFromCorruptFile();
   initDb();
   return migrateExistingData();
 }).then(() => {
   migrateStoresToTables();
-}).then(() => {
+}).then(async () => {
   // Recompute derived balances on startup (handles backup restores + missed recomputes)
   const families = db.prepare("SELECT DISTINCT id FROM families").all();
   for (const f of families) recomputeBalances(f.id);
+
+  // Write initial per-family snapshots if event log is enabled
+  if (eventLog.isEnabled()) {
+    console.log(`Event log enabled — data dir: ${DATA_DIR}`);
+    writeAllSnapshots();
+  }
 
   const server = app.listen(PORT, () => {
     const actualPort = server.address().port;
@@ -2334,10 +2654,19 @@ ensureHealthyDb().then(() => {
     createBackup().catch(err => console.error("Startup backup failed:", err));
   });
 
+  // Periodic local snapshots (every 6 hours, alongside backup schedule)
+  if (eventLog.isEnabled()) {
+    setInterval(() => {
+      try { writeAllSnapshots(); } catch (e) { console.error("Periodic snapshot failed:", e.message); }
+    }, 6 * 60 * 60 * 1000);
+  }
+
   function shutdown() {
     console.log("Shutting down...");
     if (syncInterval) clearInterval(syncInterval);
-    try { db.exec("SELECT crsql_finalize()"); } catch (e) { /* ignore if already finalized */ }
+    // Write local snapshots before exiting (best-effort, sync)
+    try { writeAllSnapshots(); } catch (e) { console.error("Shutdown snapshot failed:", e.message); }
+    try { db.exec("SELECT crsql_finalize()"); } catch (e) { /* ignore */ }
     db.close();
     process.exit(0);
   }

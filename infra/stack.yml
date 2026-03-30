@@ -217,6 +217,8 @@ Resources:
               Value: !Sub 'parentslop-backups-${AWS::AccountId}'
             - Name: NODE_ENV
               Value: production
+            - Name: DATA_DIR
+              Value: /data
           Secrets:
             - Name: SYNC_SECRET
               ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/parentslop/sync-secret'
@@ -240,7 +242,10 @@ Resources:
           Subnets: !Ref SubnetIds
           SecurityGroups: [!Ref ECSSecurityGroup]
       EnableExecuteCommand: true
+      AvailabilityZoneRebalancing: DISABLED
       DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
         DeploymentCircuitBreaker:
           Enable: true
           Rollback: true
