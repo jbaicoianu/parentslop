@@ -1770,6 +1770,58 @@ app.post("/api/completions/penalty", requireFamilyAuth, requireAdmin, async (req
   res.json(obj);
 });
 
+// POST /api/completions/backfill — admin creates historical completions for missed days
+app.post("/api/completions/backfill", requireFamilyAuth, requireAdmin, async (req, res) => {
+  const { taskId, userId, dates, note } = req.body;
+  if (!taskId || !userId || !Array.isArray(dates) || dates.length === 0) {
+    return res.status(400).json({ error: "taskId, userId, and dates[] required" });
+  }
+
+  const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(taskId, req.familyId);
+  if (!task) return res.status(404).json({ error: "task not found" });
+
+  const rewards = computeRewards(task, 1, 1); // no streak/timer bonuses for backfill
+  const results = [];
+
+  for (const dateStr of dates) {
+    // Validate date format (YYYY-MM-DD)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      results.push({ date: dateStr, error: "invalid date format" });
+      continue;
+    }
+
+    // Check for duplicate: same user+task+day already exists
+    const existing = db.prepare(
+      `SELECT id FROM completions WHERE family_id = ? AND task_id = ? AND user_id = ? AND status = 'approved' AND completed_at LIKE ?`
+    ).get(req.familyId, taskId, userId, dateStr + '%');
+    if (existing) {
+      results.push({ date: dateStr, skipped: true, reason: "already exists" });
+      continue;
+    }
+
+    const id = crypto.randomUUID();
+    const completedAt = dateStr + "T12:00:00.000Z"; // noon UTC as a neutral timestamp
+
+    const completionData = {
+      family_id: req.familyId, task_id: taskId, user_id: userId, status: 'approved',
+      completed_at: completedAt, approved_at: completedAt,
+      rewards: JSON.stringify(rewards), timer_seconds: null,
+      streak_count: 0, streak_multiplier: 1, timer_multiplier: 1,
+      note: note || 'backfill', is_penalty: 0, is_hourly: 0, total_seconds: null, worklog: null,
+    };
+    db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, approved_at, rewards, timer_seconds, streak_count, streak_multiplier, timer_multiplier, note, is_penalty, is_hourly, total_seconds, worklog)
+      VALUES (?, ?, ?, ?, 'approved', ?, ?, ?, NULL, 0, 1, 1, ?, 0, 0, NULL, NULL)`)
+      .run(id, req.familyId, taskId, userId, completedAt, completedAt, JSON.stringify(rewards), note || 'backfill');
+    emitEvent(req.familyId, "completions", id, "insert", completionData);
+    creditRewardsServer(req.familyId, userId, rewards);
+    results.push({ date: dateStr, id, rewards });
+  }
+
+  broadcastSSE(req.familyId, "completion:added", {});
+  broadcastSSE(req.familyId, "balances:changed", { userId });
+  res.json({ inserted: results.filter(r => r.id).length, skipped: results.filter(r => r.skipped).length, results });
+});
+
 // POST /api/completions/hourly — submit hourly work
 app.post("/api/completions/hourly", requireFamilyAuth, async (req, res) => {
   const { taskId, userId, _clientId } = req.body;

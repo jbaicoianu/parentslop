@@ -2022,5 +2022,7 @@ window.tracker = {
   getUserPref,
   setUserPref,
   buildBalanceTimeline,
+  apiFetch,
+  refreshState: _refreshState,
   TRACKER_CSS,
 };
