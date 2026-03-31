@@ -535,7 +535,7 @@ function migrateFromOldDb(oldDbPath) {
     oldDb = new Database(oldDbPath, { readonly: true });
     oldDb.loadExtension(CRSQLITE_EXT);
 
-    const tables = [...FAMILY_SNAPSHOT_TABLES, "sessions"];
+    const tables = [...FAMILY_SNAPSHOT_TABLES];
     for (const table of tables) {
       if (table === "field_versions") continue; // will be rebuilt
       try {
@@ -590,26 +590,63 @@ function verifyPassword(password, hash, salt) {
 }
 
 // --- Session helpers ---------------------------------------------------------
+// Sessions are stored as individual JSON files on EFS so they survive deploys.
+// Path: {sessionsDir}/{sessionId}.json
 
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const sessionsDir = path.join(DATA_DIR_EARLY || path.join(__dirname, "data"), "sessions");
+fs.mkdirSync(sessionsDir, { recursive: true });
+
+function sessionPath(id) {
+  return path.join(sessionsDir, `${id}.json`);
+}
 
 function createSession(familyId, memberId = null) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + SESSION_DURATION_MS).toISOString();
-  db.prepare("INSERT INTO sessions (id, family_id, member_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)").run(id, familyId, memberId, now, expiresAt);
-  return { id, familyId, memberId, expiresAt };
+  const session = { id, family_id: familyId, member_id: memberId, created_at: now, expires_at: expiresAt };
+  fs.writeFileSync(sessionPath(id), JSON.stringify(session));
+  return session;
 }
 
 function getSession(sessionId) {
   if (!sessionId) return null;
-  const session = db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId);
-  if (!session) return null;
-  if (new Date(session.expires_at) < new Date()) {
-    db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
+  try {
+    const data = JSON.parse(fs.readFileSync(sessionPath(sessionId), "utf8"));
+    if (new Date(data.expires_at) < new Date()) {
+      deleteSession(sessionId);
+      return null;
+    }
+    return data;
+  } catch {
     return null;
   }
-  return session;
+}
+
+function updateSession(sessionId, updates) {
+  const session = getSession(sessionId);
+  if (!session) return;
+  Object.assign(session, updates);
+  fs.writeFileSync(sessionPath(sessionId), JSON.stringify(session));
+}
+
+function deleteSession(sessionId) {
+  try { fs.unlinkSync(sessionPath(sessionId)); } catch {}
+}
+
+function deleteSessionsForFamily(familyId, exceptId) {
+  try {
+    for (const file of fs.readdirSync(sessionsDir)) {
+      if (!file.endsWith(".json")) continue;
+      const id = file.slice(0, -5);
+      if (id === exceptId) continue;
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), "utf8"));
+        if (data.family_id === familyId) fs.unlinkSync(path.join(sessionsDir, file));
+      } catch {}
+    }
+  } catch {}
 }
 
 // --- Auth middleware ----------------------------------------------------------
@@ -894,7 +931,7 @@ app.post("/api/auth/select-member", pinLimiter, requireFamilyAuth, async (req, r
       if (!valid) return res.status(401).json({ error: "invalid password" });
     }
 
-    db.prepare("UPDATE sessions SET member_id = ? WHERE id = ?").run(memberId, req.sessionId);
+    updateSession(req.sessionId, { member_id: memberId });
     res.json({ ok: true });
   } catch (err) {
     console.error("Select member error:", err);
@@ -904,16 +941,14 @@ app.post("/api/auth/select-member", pinLimiter, requireFamilyAuth, async (req, r
 
 // POST /api/auth/switch-user — clear member_id from session
 app.post("/api/auth/switch-user", requireFamilyAuth, (req, res) => {
-  db.prepare("UPDATE sessions SET member_id = NULL WHERE id = ?").run(req.sessionId);
+  updateSession(req.sessionId, { member_id: null });
   res.json({ ok: true });
 });
 
 // POST /api/auth/logout — delete session, clear cookie
 app.post("/api/auth/logout", (req, res) => {
   const sessionId = req.cookies?.session;
-  if (sessionId) {
-    db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
-  }
+  if (sessionId) deleteSession(sessionId);
   res.clearCookie("session", { path: "/" });
   res.json({ ok: true });
 });
@@ -1040,7 +1075,7 @@ app.post("/api/auth/change-family-password", requireFamilyAuth, async (req, res)
     db.prepare("UPDATE families SET password_hash = ?, salt = ?, needs_password_reset = 0 WHERE id = ?").run(hash, salt, req.familyId);
 
     // Invalidate all other sessions for this family
-    db.prepare("DELETE FROM sessions WHERE family_id = ? AND id != ?").run(req.familyId, req.sessionId);
+    deleteSessionsForFamily(req.familyId, req.sessionId);
 
     res.json({ ok: true });
   } catch (err) {
