@@ -223,6 +223,7 @@ Resources:
             - Name: SYNC_SECRET
               ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/parentslop/sync-secret'
           Essential: true
+          StopTimeout: 60
 
   # --- ECS Service ---
   ECSService:
@@ -244,8 +245,8 @@ Resources:
       EnableExecuteCommand: true
       AvailabilityZoneRebalancing: DISABLED
       DeploymentConfiguration:
-        MinimumHealthyPercent: 0
-        MaximumPercent: 100
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
         DeploymentCircuitBreaker:
           Enable: true
           Rollback: true
