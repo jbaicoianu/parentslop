@@ -446,7 +446,7 @@
       </div>
 
       <footer>
-        <span>ParentSlop · Task & Reward Tracker · <span id="build-stamp" style="opacity:0.4">__BUILD_TIME__</span></span>
+        <span>ParentSlop · Task & Reward Tracker · <span id="build-stamp" style="opacity:0.4">__BUILD_TIME__</span> · <span id="instance-id" style="opacity:0.4"></span></span>
       </footer>
     </main>
 
@@ -883,6 +883,12 @@
     // --- Page wiring ---------------------------------------------------------
 
     window.addEventListener("DOMContentLoaded", async () => {
+      // Populate instance ID in footer
+      fetch("/api/health").then(r => r.json()).then(d => {
+        const el = document.getElementById("instance-id");
+        if (el && d.instance) el.textContent = d.instance;
+      }).catch(() => {});
+
       const authScreen = document.getElementById("auth-screen");
       const setupWizard = document.getElementById("setup-wizard");
       const userSelector = document.getElementById("user-selector");

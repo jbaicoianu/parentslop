@@ -724,7 +724,7 @@ app.use(express.static(path.join(__dirname, "static")));
 // --- Routes ------------------------------------------------------------------
 
 // GET /api/health — lightweight health check (no auth required)
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, instance: SITE_ID }));
 
 // GET /api/store/:key — read a single store
 app.get("/api/store/:key", requireFamilyAuth, (req, res) => {
