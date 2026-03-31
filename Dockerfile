@@ -21,4 +21,4 @@ VOLUME /data
 
 EXPOSE 8080
 
-CMD ["node", "server.js", "--db", "/data/parentslop.db"]
+CMD ["node", "server.js"]

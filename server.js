@@ -19,150 +19,21 @@ const PORT = process.env.PORT || 8080;
 
 // --- SQLite setup ------------------------------------------------------------
 
+// When DATA_DIR is set (production with EFS), use LOCAL ephemeral storage for SQLite.
+// The event log on EFS is the durable source of truth; SQLite is rebuilt on startup.
+// This eliminates all SQLite-on-NFS issues (WAL, SHM, locking, data loss).
 const dbArg = process.argv.indexOf("--db");
+const DATA_DIR_EARLY = process.env.DATA_DIR; // read early for DB path decision
 const DB_PATH = dbArg !== -1 && process.argv[dbArg + 1]
   ? path.resolve(process.argv[dbArg + 1])
-  : path.join(__dirname, "parentslop.db");
+  : (DATA_DIR_EARLY ? '/tmp/parentslop.db' : path.join(__dirname, "parentslop.db"));
 
-// Check DB integrity before doing anything else. If corrupt, try restoring from S3.
-// IMPORTANT: During rolling deployments, another process may hold a lock on the DB.
-// We must distinguish SQLITE_BUSY (locked, not corrupt) from actual corruption.
-async function ensureHealthyDb() {
-  if (!fs.existsSync(DB_PATH)) return;
-
-  // Retry loop: during rolling deploys the old container may still hold the lock.
-  // Wait up to ~60s for it to release before giving up.
-  const MAX_RETRIES = 12;
-  const RETRY_DELAY_MS = 5000;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    let testDb;
-    try {
-      // Clean up stale SHM file ONLY if no other process seems to hold a lock.
-      // The SHM is safely reconstructed by SQLite when opening in WAL mode.
-      // Do NOT delete the WAL file: it may contain committed transactions.
-      const shmPath = DB_PATH + "-shm";
-      if (fs.existsSync(shmPath)) {
-        console.log("Removing stale -shm file");
-        fs.unlinkSync(shmPath);
-      }
-      testDb = new Database(DB_PATH);
-      testDb.loadExtension(CRSQLITE_EXT);
-      const result = testDb.pragma("integrity_check");
-      if (result[0]?.integrity_check !== "ok") throw new Error(`integrity_check: ${result[0]?.integrity_check}`);
-      // Also verify tables are actually readable
-      testDb.prepare("SELECT count(*) FROM stores").get();
-      testDb.prepare("SELECT count(*) FROM feedback").get();
-      try { testDb.exec("SELECT crsql_finalize()"); } catch {}
-      testDb.close();
-      console.log("DB integrity check passed");
-      return; // DB is healthy
-    } catch (e) {
-      if (testDb) try { testDb.exec("SELECT crsql_finalize()"); } catch {}
-      if (testDb) try { testDb.close(); } catch {}
-
-      // Check if this is a lock/busy error (NOT corruption)
-      const isBusy = e.message && (
-        e.message.includes("SQLITE_BUSY") ||
-        e.message.includes("database is locked") ||
-        e.message.includes("database table is locked") ||
-        e.message.includes("error during initialization")
-      );
-
-      if (isBusy) {
-        if (attempt < MAX_RETRIES) {
-          console.log(`DB locked (attempt ${attempt}/${MAX_RETRIES}), waiting ${RETRY_DELAY_MS/1000}s for other process to release...`);
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-          continue;
-        }
-        // Exhausted retries but DB is locked, not corrupt — do NOT restore from backup
-        console.error(`DB still locked after ${MAX_RETRIES} attempts. Proceeding anyway (NOT restoring from backup).`);
-        return;
-      }
-
-      // Genuine corruption — attempt S3 restore
-      console.error(`DB corrupt: ${e.message}`);
-      if (!s3) { console.error("No BACKUP_BUCKET configured — cannot auto-restore"); return; }
-      console.log("Attempting restore from S3...");
-      try {
-        const list = await s3.send(new ListObjectsV2Command({ Bucket: BACKUP_BUCKET, Prefix: "backups/parentslop-" }));
-        const backups = (list.Contents || []).sort((a, b) => b.LastModified - a.LastModified);
-        if (backups.length === 0) { console.error("No backups found in S3"); return; }
-        const latest = backups[0];
-        console.log(`Restoring from ${latest.Key} (${latest.LastModified.toISOString()})`);
-        const resp = await s3.send(new GetObjectCommand({ Bucket: BACKUP_BUCKET, Key: latest.Key }));
-        const chunks = []; for await (const chunk of resp.Body) chunks.push(chunk);
-        // Move corrupt DB aside
-        fs.renameSync(DB_PATH, DB_PATH + ".corrupt");
-        for (const suf of ["-wal", "-shm"]) { try { fs.unlinkSync(DB_PATH + suf); } catch {} }
-        fs.writeFileSync(DB_PATH, Buffer.concat(chunks));
-        console.log("Restore complete");
-      } catch (restoreErr) {
-        console.error("Restore failed:", restoreErr.message);
-      }
-      return;
-    }
-  }
-}
-
-// Check if a .corrupt file (misnamed by previous buggy deploys) actually has more data
-// than the current DB. If so, swap it in as the primary database.
-function recoverFromCorruptFile() {
-  const corruptPath = DB_PATH + ".corrupt";
-  if (!fs.existsSync(corruptPath)) return;
-  if (!fs.existsSync(DB_PATH)) {
-    // No main DB but .corrupt exists — just rename it back
-    console.log("No main DB found but .corrupt exists — recovering it");
-    fs.renameSync(corruptPath, DB_PATH);
-    return;
-  }
-
-  try {
-    const mainSize = fs.statSync(DB_PATH).size;
-    const corruptSize = fs.statSync(corruptPath).size;
-    // Also check WAL file sizes
-    let mainWalSize = 0, corruptWalSize = 0;
-    try { mainWalSize = fs.statSync(DB_PATH + "-wal").size; } catch {}
-    try { corruptWalSize = fs.statSync(corruptPath + "-wal").size; } catch {}
-
-    console.log(`DB sizes: main=${mainSize}+wal${mainWalSize}, corrupt=${corruptSize}+wal${corruptWalSize}`);
-
-    // If the .corrupt file is significantly larger, it likely has more data
-    if (corruptSize > mainSize * 1.1 || (corruptSize >= mainSize && corruptWalSize > mainWalSize)) {
-      console.log("RECOVERY: .corrupt file appears to have more data — swapping it in");
-      // Move current (stale backup) aside
-      const stalePath = DB_PATH + ".stale-backup";
-      fs.renameSync(DB_PATH, stalePath);
-      for (const suf of ["-wal", "-shm"]) {
-        try { fs.renameSync(DB_PATH + suf, stalePath + suf); } catch {}
-      }
-      // Restore the .corrupt file as the main DB
-      fs.renameSync(corruptPath, DB_PATH);
-      for (const suf of ["-wal", "-shm"]) {
-        try { fs.renameSync(corruptPath + suf, DB_PATH + suf); } catch {}
-      }
-      console.log("RECOVERY: .corrupt file restored as main DB");
-    } else {
-      console.log(".corrupt file is not larger — keeping current DB");
-      // Clean up the .corrupt file
-      try { fs.unlinkSync(corruptPath); } catch {}
-      for (const suf of ["-wal", "-shm"]) {
-        try { fs.unlinkSync(corruptPath + suf); } catch {}
-      }
-    }
-  } catch (e) {
-    console.error("Recovery check failed:", e.message);
-  }
-}
-
-// DB is opened in initDb(), called during async startup after integrity check.
 let db;
 
 function initDb() {
   db = new Database(DB_PATH);
   db.loadExtension(CRSQLITE_EXT);
   db.pragma("journal_mode = WAL");
-  if (BACKUP_BUCKET) db.pragma("locking_mode = EXCLUSIVE"); // Required for NFS/EFS — avoids shared memory issues
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS stores (
@@ -543,8 +414,9 @@ function emitEvent(familyId, table, pk, op, data) {
   }
 }
 
-// Tables included in per-family snapshots (event-sourced tables + derived balances)
+// Tables included in per-family snapshots (all family data + auth + derived balances)
 const FAMILY_SNAPSHOT_TABLES = [
+  "families", "family_members",
   "stores", "feedback", "tasks", "users", "currencies", "shop_items",
   "completions", "redemptions", "balance_adjustments", "job_claims", "worklog_entries",
   "user_balances", "field_versions",
@@ -560,9 +432,12 @@ function writeFamilySnapshot(familyId) {
   };
   for (const table of FAMILY_SNAPSHOT_TABLES) {
     try {
-      // field_versions are keyed by (tbl, pk, col), not family_id — grab all for this family's rows
       if (table === "field_versions") {
+        // field_versions are keyed by (tbl, pk, col), not family_id — grab all
         data.tables[table] = db.prepare(`SELECT * FROM field_versions`).all();
+      } else if (table === "families") {
+        // families table uses id, not family_id
+        data.tables[table] = db.prepare(`SELECT * FROM families WHERE id = ?`).all(familyId);
       } else {
         data.tables[table] = db.prepare(`SELECT * FROM "${table}" WHERE family_id = ?`).all(familyId);
       }
@@ -589,6 +464,8 @@ function writeAllSnapshots() {
 function loadSnapshot(snapshot) {
   for (const [table, rows] of Object.entries(snapshot.tables || {})) {
     if (!rows || rows.length === 0) continue;
+    // Skip tables that don't exist in the current schema
+    try { db.prepare(`SELECT 1 FROM "${table}" LIMIT 0`).get(); } catch { continue; }
     const cols = Object.keys(rows[0]);
     const ph = cols.map(() => "?").join(", ");
     const stmt = db.prepare(
@@ -599,6 +476,94 @@ function loadSnapshot(snapshot) {
     });
     tx(rows);
     console.log(`  Loaded ${rows.length} rows into ${table}`);
+  }
+}
+
+/**
+ * Hydrate the local DB from EFS event log + snapshots.
+ * Called on every startup when DATA_DIR is configured (production).
+ * Falls back to migrating from the old EFS SQLite DB on first boot.
+ */
+function hydrateFromEventLog(dataDir) {
+  console.log("Hydrating local DB from event log...");
+  const familyIds = eventLog.listFamilyIds();
+  let loadedFamilies = 0;
+
+  for (const fid of familyIds) {
+    const snap = eventLog.readLocalSnapshot(fid);
+    if (snap) {
+      console.log(`Loading snapshot for family ${fid} (${snap.created_at})`);
+      loadSnapshot(snap);
+      loadedFamilies++;
+
+      // Replay events appended since the snapshot was taken
+      const events = eventLog.replayEvents(fid, snap.last_event_id);
+      if (events.length > 0) {
+        console.log(`  Replaying ${events.length} events since snapshot`);
+        for (const ev of events) applyEvent(db, ev);
+      }
+    }
+  }
+
+  // Check if auth data was loaded (families table might not be in old snapshots)
+  const famCount = db.prepare("SELECT count(*) as c FROM families").get().c;
+
+  if (famCount === 0) {
+    // No auth data — try migrating from old EFS SQLite DB (one-time bootstrap)
+    const oldDbPath = path.join(dataDir, "parentslop.db");
+    if (fs.existsSync(oldDbPath)) {
+      console.log("Snapshots missing auth data — bootstrapping from old EFS database...");
+      migrateFromOldDb(oldDbPath);
+    } else {
+      console.log("No old EFS database found — starting fresh");
+    }
+  }
+
+  const totalRows = db.prepare(
+    "SELECT (SELECT count(*) FROM completions) + (SELECT count(*) FROM tasks) + (SELECT count(*) FROM users) as total"
+  ).get().total;
+  console.log(`Hydration complete: ${loadedFamilies} families, ~${totalRows} data rows`);
+}
+
+/**
+ * One-time migration from old EFS SQLite DB.
+ * Copies ALL data into the fresh local DB.
+ */
+function migrateFromOldDb(oldDbPath) {
+  let oldDb;
+  try {
+    oldDb = new Database(oldDbPath, { readonly: true });
+    oldDb.loadExtension(CRSQLITE_EXT);
+
+    const tables = [...FAMILY_SNAPSHOT_TABLES, "sessions"];
+    for (const table of tables) {
+      if (table === "field_versions") continue; // will be rebuilt
+      try {
+        const rows = oldDb.prepare(`SELECT * FROM "${table}"`).all();
+        if (rows.length === 0) continue;
+        const cols = Object.keys(rows[0]);
+        const ph = cols.map(() => "?").join(", ");
+        const stmt = db.prepare(
+          `INSERT OR IGNORE INTO "${table}" (${cols.map(c => `"${c}"`).join(", ")}) VALUES (${ph})`
+        );
+        db.transaction((rs) => {
+          for (const row of rs) stmt.run(...cols.map(c => row[c] ?? null));
+        })(rows);
+        console.log(`  Migrated ${rows.length} rows from ${table}`);
+      } catch (e) {
+        console.error(`  Failed to migrate ${table}: ${e.message}`);
+      }
+    }
+
+    try { oldDb.exec("SELECT crsql_finalize()"); } catch {}
+    oldDb.close();
+    console.log("Migration from old EFS database complete");
+  } catch (e) {
+    console.error(`Failed to migrate from old DB: ${e.message}`);
+    if (oldDb) {
+      try { oldDb.exec("SELECT crsql_finalize()"); } catch {}
+      try { oldDb.close(); } catch {}
+    }
   }
 }
 
@@ -2682,18 +2647,25 @@ app.use((err, req, res, _next) => {
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 eventLog.init({ s3Client: s3, bucket: BACKUP_BUCKET, dir: DATA_DIR });
 
-ensureHealthyDb().then(() => {
-  recoverFromCorruptFile();
+console.log(`DB path: ${DB_PATH} (${DATA_DIR_EARLY ? 'local ephemeral — event log is source of truth' : 'local dev'})`);
+
+// Startup: create schema, hydrate from event log, start server
+(async () => {
   initDb();
-  return migrateExistingData();
-}).then(() => {
+
+  // Hydrate from event log + snapshots (production), or use existing local DB (dev)
+  if (DATA_DIR_EARLY) {
+    hydrateFromEventLog(DATA_DIR);
+  }
+
+  await migrateExistingData();
   migrateStoresToTables();
-}).then(async () => {
-  // Recompute derived balances on startup (handles backup restores + missed recomputes)
+
+  // Recompute derived balances on startup
   const families = db.prepare("SELECT DISTINCT id FROM families").all();
   for (const f of families) recomputeBalances(f.id);
 
-  // Write initial per-family snapshots if event log is enabled
+  // Write fresh snapshots (now includes families + family_members)
   if (eventLog.isEnabled()) {
     console.log(`Event log enabled — data dir: ${DATA_DIR}`);
     writeAllSnapshots();
@@ -2702,21 +2674,21 @@ ensureHealthyDb().then(() => {
   const server = app.listen(PORT, () => {
     const actualPort = server.address().port;
     console.log(`ParentSlop server running on http://localhost:${actualPort}`);
-    // Run initial backup on startup
-    createBackup().catch(err => console.error("Startup backup failed:", err));
   });
 
-  // Periodic local snapshots (every 6 hours, alongside backup schedule)
+  // Periodic snapshots — every 5 minutes. This is the durability mechanism:
+  // if the container is killed, we lose at most 5 minutes of data (recoverable
+  // from the event log on next startup).
   if (eventLog.isEnabled()) {
     setInterval(() => {
       try { writeAllSnapshots(); } catch (e) { console.error("Periodic snapshot failed:", e.message); }
-    }, 6 * 60 * 60 * 1000);
+    }, 5 * 60 * 1000);
   }
 
   function shutdown() {
     console.log("Shutting down...");
     if (syncInterval) clearInterval(syncInterval);
-    // Write local snapshots before exiting (best-effort, sync)
+    // Write final snapshots to EFS before exiting
     try { writeAllSnapshots(); } catch (e) { console.error("Shutdown snapshot failed:", e.message); }
     try { db.exec("SELECT crsql_finalize()"); } catch (e) { /* ignore */ }
     db.close();
@@ -2724,7 +2696,7 @@ ensureHealthyDb().then(() => {
   }
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
-}).catch((err) => {
-  console.error("Migration failed:", err);
+})().catch((err) => {
+  console.error("Startup failed:", err);
   process.exit(1);
 });
