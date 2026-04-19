@@ -761,6 +761,7 @@ const ADMIN_WRITE_KEYS = new Set([
   "parentslop.shop.v1",
   "parentslop.users.v1",
   "enabled_modules",
+  "stability_api_key",
 ]);
 
 // --- Middleware ---------------------------------------------------------------
@@ -2381,6 +2382,35 @@ app.post("/api/meal-options", requireFamilyAuth, async (req, res) => {
   const obj = mealOptionRowToObj(row);
   broadcastSSE(req.familyId, "meals:changed", {});
   res.json(obj);
+
+  // Fire-and-forget: auto-generate image if API key is configured and no image was provided
+  if (!t.imageUrl) {
+    try {
+      const apiKeyRow = db.prepare("SELECT value FROM stores WHERE key = ?").get(`${req.familyId}:stability_api_key`);
+      if (apiKeyRow?.value) {
+        const mealName = t.name || "food";
+        const mealDesc = t.description || "";
+        const prompt = `A delicious plate of ${mealName}. ${mealDesc}. Food photography, appetizing, well-lit, clean background`.trim();
+        const formData = new FormData();
+        formData.append("prompt", prompt);
+        formData.append("output_format", "jpeg");
+        formData.append("aspect_ratio", "4:3");
+        fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${apiKeyRow.value}`, "Accept": "image/*" },
+          body: formData,
+        }).then(async (stabilityRes) => {
+          if (!stabilityRes.ok) return;
+          const imageBuffer = Buffer.from(await stabilityRes.arrayBuffer());
+          const dataUrl = `data:image/jpeg;base64,${imageBuffer.toString("base64")}`;
+          db.prepare("UPDATE meal_options SET image_url = ? WHERE id = ? AND family_id = ?")
+            .run(dataUrl, id, req.familyId);
+          emitEvent(req.familyId, "meal_options", id, "update", { image_url: dataUrl });
+          broadcastSSE(req.familyId, "meals:changed", {});
+        }).catch(err => console.error("Auto-generate image failed:", err));
+      }
+    } catch (e) { /* ignore */ }
+  }
 });
 
 app.put("/api/meal-options/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
@@ -2399,6 +2429,55 @@ app.put("/api/meal-options/:id", requireFamilyAuth, requireAdmin, async (req, re
   const row = db.prepare("SELECT * FROM meal_options WHERE id = ?").get(req.params.id);
   broadcastSSE(req.familyId, "meals:changed", {});
   res.json(mealOptionRowToObj(row));
+});
+
+app.post("/api/meal-options/:id/generate-image", requireFamilyAuth, requireAdmin, async (req, res) => {
+  const apiKeyRow = db.prepare("SELECT value FROM stores WHERE key = ?").get(`${req.familyId}:stability_api_key`);
+  const apiKey = apiKeyRow?.value;
+  if (!apiKey) return res.status(400).json({ error: "No Stability AI API key configured. Add one in Admin > Modules." });
+
+  const option = db.prepare("SELECT * FROM meal_options WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
+  if (!option) return res.status(404).json({ error: "Meal option not found" });
+
+  const mealName = option.name || "food";
+  const mealDesc = option.description || "";
+  const prompt = `A delicious plate of ${mealName}. ${mealDesc}. Food photography, appetizing, well-lit, clean background`.trim();
+
+  try {
+    const formData = new FormData();
+    formData.append("prompt", prompt);
+    formData.append("output_format", "jpeg");
+    formData.append("aspect_ratio", "4:3");
+
+    const stabilityRes = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Accept": "image/*",
+      },
+      body: formData,
+    });
+
+    if (!stabilityRes.ok) {
+      const errText = await stabilityRes.text();
+      console.error("Stability API error:", stabilityRes.status, errText);
+      return res.status(502).json({ error: `Stability API error: ${stabilityRes.status}` });
+    }
+
+    const imageBuffer = Buffer.from(await stabilityRes.arrayBuffer());
+    const dataUrl = `data:image/jpeg;base64,${imageBuffer.toString("base64")}`;
+
+    db.prepare("UPDATE meal_options SET image_url = ? WHERE id = ? AND family_id = ?")
+      .run(dataUrl, req.params.id, req.familyId);
+    emitEvent(req.familyId, "meal_options", req.params.id, "update", { image_url: dataUrl });
+    broadcastSSE(req.familyId, "meals:changed", {});
+
+    const row = db.prepare("SELECT * FROM meal_options WHERE id = ?").get(req.params.id);
+    res.json(mealOptionRowToObj(row));
+  } catch (err) {
+    console.error("Image generation failed:", err);
+    res.status(500).json({ error: "Image generation failed" });
+  }
 });
 
 app.delete("/api/meal-options/:id", requireFamilyAuth, requireAdmin, async (req, res) => {

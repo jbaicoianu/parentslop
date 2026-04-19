@@ -10,6 +10,7 @@ class PsMeals extends HTMLElement {
     this._pendingImageDataUrl = null; // staged image for add/edit
     this._planMode = false; // drag-and-drop sidebar on week view
     this._selectedMealForPlacement = null; // mobile tap-to-place
+    this._generatingImageId = null; // meal option id currently generating
     this._unsubs = [];
   }
 
@@ -120,6 +121,25 @@ class PsMeals extends HTMLElement {
     return `<div class="${cssClass} placeholder-svg">${this._renderPlaceholderSVG(option.name, option.mealTypes)}</div>`;
   }
 
+  // --- AI image generation ---
+  async _generateImage(optionId) {
+    if (this._generatingImageId) return;
+    this._generatingImageId = optionId;
+    this.render();
+    try {
+      const res = await tracker.apiFetch(`/api/meal-options/${optionId}/generate-image`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "Image generation failed");
+      }
+    } catch (e) {
+      console.error("Generate image error:", e);
+      alert("Image generation failed");
+    }
+    this._generatingImageId = null;
+    this.render();
+  }
+
   // --- Shared meal form (add + edit) ---
   _renderMealForm(option) {
     const isEdit = !!option;
@@ -143,10 +163,17 @@ class PsMeals extends HTMLElement {
               ? `<img class="image-preview" src="${imageUrl}" alt="Preview" /><button class="btn btn-small btn-danger" data-action="remove-image">\u2715</button>`
               : `<div class="image-preview placeholder-svg">${this._renderPlaceholderSVG(name || "?", types)}</div>`}
           </div>
-          <label class="btn btn-small btn-upload">
-            <input type="file" accept="image/*" id="meal-image-input" style="display:none" />
-            ${imageUrl ? "Change image" : "Add image"}
-          </label>
+          <div class="image-btn-row">
+            <label class="btn btn-small btn-upload">
+              <input type="file" accept="image/*" id="meal-image-input" style="display:none" />
+              ${imageUrl ? "Change image" : "Add image"}
+            </label>
+            ${isEdit ? `<button class="btn btn-small btn-ai ${this._generatingImageId === option.id ? "generating" : ""}"
+                          data-action="generate-image" data-option-id="${option.id}"
+                          ${this._generatingImageId ? "disabled" : ""}>
+                          ${this._generatingImageId === option.id ? "Generating..." : "Generate with AI"}
+                        </button>` : ""}
+          </div>
         </div>
         <div class="form-actions">
           <button class="btn btn-primary" data-action="${isEdit ? "save-edit" : "save-option"}">${isEdit ? "Save" : "Add"}</button>
@@ -319,9 +346,19 @@ class PsMeals extends HTMLElement {
       const votes = tracker.getMealVoteSummary(o.id);
       const userVote = currentUser ? tracker.getUserMealVote(o.id, currentUser.id) : 0;
       const suggestor = trackerStore.users.data.find(u => u.id === o.suggestedBy);
+      const generating = this._generatingImageId === o.id;
       return `
         <div class="menu-card">
-          ${this._renderMealImage(o)}
+          <div class="card-img-wrap">
+            ${this._renderMealImage(o)}
+            ${isAdmin && !o.imageUrl ? `<button class="ai-gen-overlay ${generating ? "generating" : ""}"
+              data-action="generate-image" data-option-id="${o.id}" ${this._generatingImageId ? "disabled" : ""}>
+              ${generating ? '<span class="ai-spinner"></span> Generating...' : "Generate with AI"}
+            </button>` : ""}
+            ${isAdmin && o.imageUrl ? `<button class="ai-regen-btn"
+              data-action="generate-image" data-option-id="${o.id}" ${this._generatingImageId ? "disabled" : ""}
+              title="Regenerate with AI">${generating ? '<span class="ai-spinner"></span>' : "AI"}</button>` : ""}
+          </div>
           <div class="card-body">
             <div class="menu-name">${o.name}</div>
             ${o.description ? `<div class="menu-desc">${o.description}</div>` : ""}
@@ -520,6 +557,26 @@ class PsMeals extends HTMLElement {
       .image-preview.placeholder-svg { width: 80px; height: 60px; }
       .image-preview.placeholder-svg svg { width: 100%; height: 100%; border-radius: 8px; }
       .btn-upload { cursor: pointer; }
+      .image-btn-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .btn-ai { background: #1e1b4b; border-color: #4338ca; color: #a5b4fc; }
+      .btn-ai:hover { background: #2e2660; }
+      .btn-ai.generating { opacity: 0.7; cursor: wait; }
+      .btn-ai:disabled { opacity: 0.5; cursor: not-allowed; }
+      .card-img-wrap { position: relative; }
+      .ai-gen-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                        background: rgba(0,0,0,0.5); border: none; color: #a5b4fc; font-size: 0.78rem;
+                        font-weight: 600; cursor: pointer; opacity: 0; transition: opacity 0.2s; }
+      .card-img-wrap:hover .ai-gen-overlay { opacity: 1; }
+      .ai-gen-overlay.generating { opacity: 1; cursor: wait; }
+      .ai-gen-overlay:disabled { cursor: not-allowed; }
+      .ai-regen-btn { position: absolute; top: 4px; right: 4px; background: rgba(30,27,75,0.85); border: 1px solid #4338ca;
+                      color: #a5b4fc; font-size: 0.65rem; font-weight: 700; padding: 2px 6px; border-radius: 6px;
+                      cursor: pointer; opacity: 0; transition: opacity 0.2s; }
+      .card-img-wrap:hover .ai-regen-btn { opacity: 1; }
+      .ai-regen-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .ai-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #a5b4fc;
+                    border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
       .form-actions { display: flex; gap: 8px; }
       .btn { padding: 6px 16px; border-radius: 8px; border: 1px solid #25273a; background: #1a1c2a;
              color: #e2e4f0; cursor: pointer; font-size: 0.82rem; }
@@ -686,6 +743,15 @@ class PsMeals extends HTMLElement {
         this.render();
       });
     }
+
+    // Generate image with AI
+    sr.querySelectorAll("[data-action='generate-image']").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this._generateImage(btn.dataset.optionId);
+      });
+    });
 
     // Remove image
     sr.querySelectorAll("[data-action='remove-image']").forEach(b => {
