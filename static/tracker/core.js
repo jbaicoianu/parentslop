@@ -47,6 +47,11 @@ const _state = {
   worklog: [],
   balances: {}, // { userId: { currencyId: amount } }
   balanceAdjustments: [],
+  mealOptions: [],
+  mealVotes: [],
+  mealPlan: [],
+  mealLog: [],
+  enabledModules: [],
 };
 
 // --- StateProxy (backward compat for trackerStore.*.data) --------------------
@@ -110,6 +115,10 @@ const redemptionProxy = new StateProxy("redemptions");
 const jobClaimProxy = new StateProxy("jobClaims");
 const worklogProxy = new StateProxy("worklog");
 const balanceAdjustmentProxy = new StateProxy("balanceAdjustments");
+const mealOptionsProxy = new StateProxy("mealOptions");
+const mealVotesProxy = new StateProxy("mealVotes");
+const mealPlanProxy = new StateProxy("mealPlan");
+const mealLogProxy = new StateProxy("mealLog");
 const appStore = new AppStore();
 
 // --- Local user preferences (persisted to localStorage) ----------------------
@@ -1215,6 +1224,10 @@ function _connectSSE() {
     _sseSource.addEventListener("worklog:changed", () => {
       _refreshWorklog();
     });
+
+    _sseSource.addEventListener("meals:changed", () => {
+      _refreshMeals();
+    });
   } catch (e) {
     console.warn("SSE connection failed:", e);
     setTimeout(() => _connectSSE(), 5000);
@@ -1264,6 +1277,21 @@ async function _refreshWorklog() {
   }
 }
 
+async function _refreshMeals() {
+  try {
+    const data = await apiFetch("/api/state");
+    _state.mealOptions = data.mealOptions || [];
+    _state.mealVotes = data.mealVotes || [];
+    _state.mealPlan = data.mealPlan || [];
+    _state.mealLog = data.mealLog || [];
+    _state.enabledModules = data.enabledModules || [];
+    _cacheState();
+    bus.emit("meals:changed");
+  } catch (e) {
+    console.warn("Failed to refresh meals:", e);
+  }
+}
+
 function _applyState(data) {
   _state.users = data.users || [];
   _state.tasks = data.tasks || [];
@@ -1275,6 +1303,11 @@ function _applyState(data) {
   _state.worklog = data.worklog || [];
   _state.balanceAdjustments = data.balanceAdjustments || [];
   _state.balances = data.balances || {};
+  _state.mealOptions = data.mealOptions || [];
+  _state.mealVotes = data.mealVotes || [];
+  _state.mealPlan = data.mealPlan || [];
+  _state.mealLog = data.mealLog || [];
+  _state.enabledModules = data.enabledModules || [];
 
   // Attach balances to user objects for backward compat
   for (const u of _state.users) {
@@ -1296,6 +1329,7 @@ function _applyState(data) {
   bus.emit("redemption:added");
   bus.emit("jobclaims:changed");
   bus.emit("worklog:changed");
+  bus.emit("meals:changed");
 }
 
 // --- State cache (IndexedDB persistence) ------------------------------------
@@ -1321,6 +1355,11 @@ async function _loadCachedState() {
     _state.worklog = cached.worklog || [];
     _state.balanceAdjustments = cached.balanceAdjustments || [];
     _state.balances = cached.balances || {};
+    _state.mealOptions = cached.mealOptions || [];
+    _state.mealVotes = cached.mealVotes || [];
+    _state.mealPlan = cached.mealPlan || [];
+    _state.mealLog = cached.mealLog || [];
+    _state.enabledModules = cached.enabledModules || [];
     for (const u of _state.users) {
       u.balances = _state.balances[u.id] || {};
     }
@@ -1948,6 +1987,74 @@ function buildBalanceTimeline(userId) {
   return events;
 }
 
+// --- Module system -----------------------------------------------------------
+
+function isModuleEnabled(moduleId) {
+  const CORE = new Set(["dashboard", "tasks", "shop", "history", "admin"]);
+  if (CORE.has(moduleId)) return true;
+  return (_state.enabledModules || []).includes(moduleId);
+}
+
+function getEnabledModules() {
+  return _state.enabledModules || [];
+}
+
+// --- Meal functions ----------------------------------------------------------
+
+async function createMealOption(data) {
+  return apiFetch("/api/meal-options", { method: "POST", body: JSON.stringify(data) });
+}
+
+async function updateMealOption(id, data) {
+  return apiFetch(`/api/meal-options/${id}`, { method: "PUT", body: JSON.stringify(data) });
+}
+
+async function archiveMealOption(id) {
+  return apiFetch(`/api/meal-options/${id}`, { method: "DELETE" });
+}
+
+async function voteMeal(mealOptionId, vote) {
+  return apiFetch("/api/meal-votes", { method: "POST", body: JSON.stringify({ mealOptionId, vote }) });
+}
+
+async function addMealPlan(data) {
+  return apiFetch("/api/meal-plan", { method: "POST", body: JSON.stringify(data) });
+}
+
+async function updateMealPlan(id, data) {
+  return apiFetch(`/api/meal-plan/${id}`, { method: "PUT", body: JSON.stringify(data) });
+}
+
+async function removeMealPlan(id) {
+  return apiFetch(`/api/meal-plan/${id}`, { method: "DELETE" });
+}
+
+async function logMeal(data) {
+  return apiFetch("/api/meal-log", { method: "POST", body: JSON.stringify(data) });
+}
+
+async function unlogMeal(id) {
+  return apiFetch(`/api/meal-log/${id}`, { method: "DELETE" });
+}
+
+function getMealVoteSummary(mealOptionId) {
+  const votes = _state.mealVotes.filter(v => v.mealOptionId === mealOptionId);
+  return { up: votes.filter(v => v.vote === 1).length, down: votes.filter(v => v.vote === -1).length };
+}
+
+function getUserMealVote(mealOptionId, userId) {
+  const v = _state.mealVotes.find(v => v.mealOptionId === mealOptionId && v.userId === userId);
+  return v ? v.vote : 0;
+}
+
+function getMealPlanForDate(date) {
+  return _state.mealPlan.filter(p => p.date === date);
+}
+
+function getMealLogForDate(date) {
+  return _state.mealLog.filter(l => l.date === date);
+}
+
 // --- Expose globals ----------------------------------------------------------
 
 window.eventBus = bus;
@@ -1962,6 +2069,10 @@ window.trackerStore = {
   jobClaims: jobClaimProxy,
   worklog: worklogProxy,
   balanceAdjustments: balanceAdjustmentProxy,
+  mealOptions: mealOptionsProxy,
+  mealVotes: mealVotesProxy,
+  mealPlan: mealPlanProxy,
+  mealLog: mealLogProxy,
 };
 window.tracker = {
   initStores,
@@ -2022,6 +2133,21 @@ window.tracker = {
   getUserPref,
   setUserPref,
   buildBalanceTimeline,
+  isModuleEnabled,
+  getEnabledModules,
+  createMealOption,
+  updateMealOption,
+  archiveMealOption,
+  voteMeal,
+  addMealPlan,
+  updateMealPlan,
+  removeMealPlan,
+  logMeal,
+  unlogMeal,
+  getMealVoteSummary,
+  getUserMealVote,
+  getMealPlanForDate,
+  getMealLogForDate,
   apiFetch,
   refreshState: _refreshState,
   TRACKER_CSS,

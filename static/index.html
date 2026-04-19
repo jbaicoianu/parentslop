@@ -394,6 +394,9 @@
           <!-- History -->
           <ps-history id="view-history"></ps-history>
 
+          <!-- Meals -->
+          <ps-meals id="view-meals"></ps-meals>
+
           <!-- Games tab -->
           <div id="view-games">
             <div style="border-radius:24px; padding:18px; background:radial-gradient(circle at top left,#1a1c2a,#090a13); border:1px solid #25273a; box-shadow:0 14px 30px rgba(0,0,0,0.55);">
@@ -414,6 +417,7 @@
               <button data-admin-tab="log">Log</button>
               <button data-admin-tab="feedback">Feedback</button>
               <button data-admin-tab="security">Security</button>
+              <button data-admin-tab="modules">Modules</button>
               <button data-admin-tab="data">Data</button>
             </div>
             <div id="admin-content">
@@ -425,6 +429,7 @@
               <ps-admin-log id="admin-log"></ps-admin-log>
               <ps-admin-feedback id="admin-feedback"></ps-admin-feedback>
               <ps-admin-security id="admin-security"></ps-admin-security>
+              <ps-admin-modules id="admin-modules"></ps-admin-modules>
               <div id="admin-data">
                 <div class="data-panel">
                   <h3>Data Management</h3>
@@ -502,6 +507,8 @@
   <script src="/tracker/components/ps-calendar-view.js"></script>
   <script src="/tracker/components/ps-balance-chart.js"></script>
   <script src="/tracker/components/ps-history.js"></script>
+  <script src="/tracker/components/ps-meals.js"></script>
+  <script src="/tracker/components/ps-admin-modules.js"></script>
   <script src="/tracker/components/ps-feedback-fab.js"></script>
 
   <script>
@@ -933,7 +940,7 @@
       }
 
       // ---- Hash-based routing ----
-      const VALID_VIEWS = ['dashboard', 'tasks', 'shop', 'history', 'games', 'admin'];
+      const VALID_VIEWS = ['dashboard', 'tasks', 'shop', 'history', 'meals', 'games', 'admin'];
 
       function parseHash() {
         const hash = location.hash.replace(/^#/, '');

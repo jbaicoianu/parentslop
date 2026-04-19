@@ -113,12 +113,13 @@ class PsNavBar extends HTMLElement {
       { id: "tasks", label: "Tasks", icon: "\u2713" },
       { id: "shop", label: "Shop", icon: "\u2605" },
       { id: "history", label: "History", icon: "\u231A" },
-      { id: "games", label: "Games", icon: "\u25B6" },
+      { id: "meals", label: "Meals", icon: "\uD83C\uDF7D", module: "meals" },
+      { id: "games", label: "Games", icon: "\u25B6", module: "games" },
     ];
     if (isAdmin) {
       tabs.push({ id: "admin", label: "Admin", icon: "\u2699" });
     }
-    return tabs;
+    return tabs.filter(t => !t.module || tracker.isModuleEnabled(t.module));
   }
 
   _getPendingCount() {

@@ -336,6 +336,55 @@ function initDb() {
     }
   }
 
+  // Meal planning tables (CRRs)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meal_options (
+      id TEXT NOT NULL PRIMARY KEY,
+      family_id TEXT DEFAULT '',
+      name TEXT DEFAULT '',
+      description TEXT DEFAULT '',
+      meal_types TEXT DEFAULT '[]',
+      suggested_by TEXT DEFAULT '',
+      archived INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT ''
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meal_votes (
+      id TEXT NOT NULL PRIMARY KEY,
+      family_id TEXT DEFAULT '',
+      meal_option_id TEXT DEFAULT '',
+      user_id TEXT DEFAULT '',
+      vote INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT ''
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meal_plan (
+      id TEXT NOT NULL PRIMARY KEY,
+      family_id TEXT DEFAULT '',
+      date TEXT DEFAULT '',
+      meal_type TEXT DEFAULT '',
+      meal_option_id TEXT DEFAULT '',
+      notes TEXT DEFAULT '',
+      created_at TEXT DEFAULT ''
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meal_log (
+      id TEXT NOT NULL PRIMARY KEY,
+      family_id TEXT DEFAULT '',
+      date TEXT DEFAULT '',
+      meal_type TEXT DEFAULT '',
+      user_id TEXT DEFAULT '',
+      meal_option_id TEXT DEFAULT '',
+      logged_at TEXT DEFAULT ''
+    )
+  `);
+
   // Derived table (NOT a CRR — recomputed from events)
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_balances (
@@ -348,7 +397,7 @@ function initDb() {
   `);
 
   // Mark new tables as CRRs
-  const crrTables = ['tasks', 'users', 'currencies', 'shop_items', 'completions', 'redemptions', 'balance_adjustments', 'job_claims', 'worklog_entries'];
+  const crrTables = ['tasks', 'users', 'currencies', 'shop_items', 'completions', 'redemptions', 'balance_adjustments', 'job_claims', 'worklog_entries', 'meal_options', 'meal_votes', 'meal_plan', 'meal_log'];
   for (const table of crrTables) {
     migrateToCrrCompatible(table, 'id');
     try { db.exec(`SELECT crsql_as_crr('${table}')`); } catch (e) {
@@ -419,6 +468,7 @@ const FAMILY_SNAPSHOT_TABLES = [
   "families", "family_members",
   "stores", "feedback", "tasks", "users", "currencies", "shop_items",
   "completions", "redemptions", "balance_adjustments", "job_claims", "worklog_entries",
+  "meal_options", "meal_votes", "meal_plan", "meal_log",
   "user_balances", "field_versions",
 ];
 
@@ -705,6 +755,7 @@ const ADMIN_WRITE_KEYS = new Set([
   "parentslop.currencies.v1",
   "parentslop.shop.v1",
   "parentslop.users.v1",
+  "enabled_modules",
 ]);
 
 // --- Middleware ---------------------------------------------------------------
@@ -1246,6 +1297,35 @@ function balanceAdjustmentRowToObj(row) {
   };
 }
 
+function mealOptionRowToObj(row) {
+  return {
+    id: row.id, familyId: row.family_id, name: row.name, description: row.description,
+    mealTypes: jsonOrDefault(row.meal_types, []), suggestedBy: row.suggested_by,
+    archived: !!row.archived, createdAt: row.created_at,
+  };
+}
+
+function mealVoteRowToObj(row) {
+  return {
+    id: row.id, familyId: row.family_id, mealOptionId: row.meal_option_id,
+    userId: row.user_id, vote: row.vote, createdAt: row.created_at,
+  };
+}
+
+function mealPlanRowToObj(row) {
+  return {
+    id: row.id, familyId: row.family_id, date: row.date, mealType: row.meal_type,
+    mealOptionId: row.meal_option_id, notes: row.notes, createdAt: row.created_at,
+  };
+}
+
+function mealLogRowToObj(row) {
+  return {
+    id: row.id, familyId: row.family_id, date: row.date, mealType: row.meal_type,
+    userId: row.user_id, mealOptionId: row.meal_option_id, loggedAt: row.logged_at,
+  };
+}
+
 // --- Server-side reward computation ------------------------------------------
 
 function dateKeyServer(iso) {
@@ -1381,7 +1461,18 @@ app.get("/api/state", requireFamilyAuth, (req, res) => {
     u.balances = balances[u.id] || {};
   }
 
-  res.json({ users, tasks, currencies, completions, shopItems, redemptions, jobClaims, worklog, balances, balanceAdjustments });
+  // Meal data
+  const mealOptions = db.prepare("SELECT * FROM meal_options WHERE family_id = ?").all(fid).map(mealOptionRowToObj);
+  const mealVotes = db.prepare("SELECT * FROM meal_votes WHERE family_id = ?").all(fid).map(mealVoteRowToObj);
+  const mealPlan = db.prepare("SELECT * FROM meal_plan WHERE family_id = ?").all(fid).map(mealPlanRowToObj);
+  const mealLog = db.prepare("SELECT * FROM meal_log WHERE family_id = ?").all(fid).map(mealLogRowToObj);
+
+  // Enabled modules
+  const modulesRow = db.prepare("SELECT value FROM stores WHERE key = ?").get(`${fid}:enabled_modules`);
+  let enabledModules = [];
+  try { enabledModules = JSON.parse(modulesRow?.value || "[]"); } catch {}
+
+  res.json({ users, tasks, currencies, completions, shopItems, redemptions, jobClaims, worklog, balances, balanceAdjustments, mealOptions, mealVotes, mealPlan, mealLog, enabledModules });
 });
 
 // --- Typed API: Config CRUD --------------------------------------------------
@@ -2259,6 +2350,172 @@ app.post("/api/recompute-balances", requireFamilyAuth, requireAdmin, (req, res) 
   }
   broadcastSSE(req.familyId, "balances:recomputed", balances);
   res.json({ ok: true, balances });
+});
+
+// --- Typed API: Meals --------------------------------------------------------
+
+app.get("/api/meal-options", requireFamilyAuth, (req, res) => {
+  const rows = db.prepare("SELECT * FROM meal_options WHERE family_id = ? AND archived = 0").all(req.familyId);
+  res.json(rows.map(mealOptionRowToObj));
+});
+
+app.post("/api/meal-options", requireFamilyAuth, async (req, res) => {
+  const t = req.body;
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const rowData = {
+    family_id: req.familyId, name: t.name || '', description: t.description || '',
+    meal_types: JSON.stringify(t.mealTypes || []), suggested_by: req.memberId || '',
+    archived: 0, created_at: now,
+  };
+  db.prepare(`INSERT INTO meal_options (id, family_id, name, description, meal_types, suggested_by, archived, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, rowData.family_id, rowData.name, rowData.description, rowData.meal_types, rowData.suggested_by, rowData.archived, rowData.created_at);
+  emitEvent(req.familyId, "meal_options", id, "insert", rowData);
+  const row = db.prepare("SELECT * FROM meal_options WHERE id = ?").get(id);
+  const obj = mealOptionRowToObj(row);
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json(obj);
+});
+
+app.put("/api/meal-options/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
+  const t = req.body;
+  const existing = db.prepare("SELECT * FROM meal_options WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
+  if (!existing) return res.status(404).json({ error: "not found" });
+  const updatedFields = {
+    name: t.name ?? existing.name,
+    description: t.description ?? existing.description,
+    meal_types: t.mealTypes ? JSON.stringify(t.mealTypes) : existing.meal_types,
+  };
+  db.prepare("UPDATE meal_options SET name = ?, description = ?, meal_types = ? WHERE id = ? AND family_id = ?")
+    .run(updatedFields.name, updatedFields.description, updatedFields.meal_types, req.params.id, req.familyId);
+  emitEvent(req.familyId, "meal_options", req.params.id, "update", updatedFields);
+  const row = db.prepare("SELECT * FROM meal_options WHERE id = ?").get(req.params.id);
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json(mealOptionRowToObj(row));
+});
+
+app.delete("/api/meal-options/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
+  const result = db.prepare("UPDATE meal_options SET archived = 1 WHERE id = ? AND family_id = ?").run(req.params.id, req.familyId);
+  if (result.changes === 0) return res.status(404).json({ error: "not found" });
+  emitEvent(req.familyId, "meal_options", req.params.id, "update", { archived: 1 });
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json({ ok: true });
+});
+
+app.post("/api/meal-votes", requireFamilyAuth, async (req, res) => {
+  const { mealOptionId, vote } = req.body;
+  if (!mealOptionId || ![-1, 1].includes(vote)) return res.status(400).json({ error: "invalid vote" });
+  const userId = req.memberId;
+  // Check for existing vote by this user on this option
+  const existing = db.prepare("SELECT * FROM meal_votes WHERE family_id = ? AND meal_option_id = ? AND user_id = ?")
+    .get(req.familyId, mealOptionId, userId);
+  if (existing) {
+    if (existing.vote === vote) {
+      // Same vote = remove
+      db.prepare("DELETE FROM meal_votes WHERE id = ?").run(existing.id);
+      emitEvent(req.familyId, "meal_votes", existing.id, "delete");
+      broadcastSSE(req.familyId, "meals:changed", {});
+      return res.json({ ok: true, action: "removed" });
+    } else {
+      // Different vote = update
+      db.prepare("UPDATE meal_votes SET vote = ? WHERE id = ?").run(vote, existing.id);
+      emitEvent(req.familyId, "meal_votes", existing.id, "update", { vote });
+      broadcastSSE(req.familyId, "meals:changed", {});
+      const row = db.prepare("SELECT * FROM meal_votes WHERE id = ?").get(existing.id);
+      return res.json(mealVoteRowToObj(row));
+    }
+  }
+  // New vote
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const rowData = { family_id: req.familyId, meal_option_id: mealOptionId, user_id: userId, vote, created_at: now };
+  db.prepare("INSERT INTO meal_votes (id, family_id, meal_option_id, user_id, vote, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(id, rowData.family_id, rowData.meal_option_id, rowData.user_id, rowData.vote, rowData.created_at);
+  emitEvent(req.familyId, "meal_votes", id, "insert", rowData);
+  broadcastSSE(req.familyId, "meals:changed", {});
+  const row = db.prepare("SELECT * FROM meal_votes WHERE id = ?").get(id);
+  res.json(mealVoteRowToObj(row));
+});
+
+app.get("/api/meal-plan", requireFamilyAuth, (req, res) => {
+  let rows;
+  if (req.query.weekStart) {
+    const start = req.query.weekStart;
+    const end = new Date(new Date(start).getTime() + 7 * 86400000).toISOString().slice(0, 10);
+    rows = db.prepare("SELECT * FROM meal_plan WHERE family_id = ? AND date >= ? AND date < ?").all(req.familyId, start, end);
+  } else {
+    rows = db.prepare("SELECT * FROM meal_plan WHERE family_id = ?").all(req.familyId);
+  }
+  res.json(rows.map(mealPlanRowToObj));
+});
+
+app.post("/api/meal-plan", requireFamilyAuth, requireAdmin, async (req, res) => {
+  const t = req.body;
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const rowData = {
+    family_id: req.familyId, date: t.date || '', meal_type: t.mealType || '',
+    meal_option_id: t.mealOptionId || '', notes: t.notes || '', created_at: now,
+  };
+  db.prepare("INSERT INTO meal_plan (id, family_id, date, meal_type, meal_option_id, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(id, rowData.family_id, rowData.date, rowData.meal_type, rowData.meal_option_id, rowData.notes, rowData.created_at);
+  emitEvent(req.familyId, "meal_plan", id, "insert", rowData);
+  const row = db.prepare("SELECT * FROM meal_plan WHERE id = ?").get(id);
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json(mealPlanRowToObj(row));
+});
+
+app.put("/api/meal-plan/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
+  const t = req.body;
+  const existing = db.prepare("SELECT * FROM meal_plan WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
+  if (!existing) return res.status(404).json({ error: "not found" });
+  const updatedFields = {
+    date: t.date ?? existing.date,
+    meal_type: t.mealType ?? existing.meal_type,
+    meal_option_id: t.mealOptionId ?? existing.meal_option_id,
+    notes: t.notes ?? existing.notes,
+  };
+  db.prepare("UPDATE meal_plan SET date = ?, meal_type = ?, meal_option_id = ?, notes = ? WHERE id = ? AND family_id = ?")
+    .run(updatedFields.date, updatedFields.meal_type, updatedFields.meal_option_id, updatedFields.notes, req.params.id, req.familyId);
+  emitEvent(req.familyId, "meal_plan", req.params.id, "update", updatedFields);
+  const row = db.prepare("SELECT * FROM meal_plan WHERE id = ?").get(req.params.id);
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json(mealPlanRowToObj(row));
+});
+
+app.delete("/api/meal-plan/:id", requireFamilyAuth, requireAdmin, async (req, res) => {
+  const existing = db.prepare("SELECT * FROM meal_plan WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
+  if (!existing) return res.status(404).json({ error: "not found" });
+  db.prepare("DELETE FROM meal_plan WHERE id = ? AND family_id = ?").run(req.params.id, req.familyId);
+  emitEvent(req.familyId, "meal_plan", req.params.id, "delete");
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json({ ok: true });
+});
+
+app.post("/api/meal-log", requireFamilyAuth, async (req, res) => {
+  const t = req.body;
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const rowData = {
+    family_id: req.familyId, date: t.date || '', meal_type: t.mealType || '',
+    user_id: req.memberId || '', meal_option_id: t.mealOptionId || '', logged_at: now,
+  };
+  db.prepare("INSERT INTO meal_log (id, family_id, date, meal_type, user_id, meal_option_id, logged_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(id, rowData.family_id, rowData.date, rowData.meal_type, rowData.user_id, rowData.meal_option_id, rowData.logged_at);
+  emitEvent(req.familyId, "meal_log", id, "insert", rowData);
+  const row = db.prepare("SELECT * FROM meal_log WHERE id = ?").get(id);
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json(mealLogRowToObj(row));
+});
+
+app.delete("/api/meal-log/:id", requireFamilyAuth, async (req, res) => {
+  const existing = db.prepare("SELECT * FROM meal_log WHERE id = ? AND family_id = ?").get(req.params.id, req.familyId);
+  if (!existing) return res.status(404).json({ error: "not found" });
+  db.prepare("DELETE FROM meal_log WHERE id = ? AND family_id = ?").run(req.params.id, req.familyId);
+  emitEvent(req.familyId, "meal_log", req.params.id, "delete");
+  broadcastSSE(req.familyId, "meals:changed", {});
+  res.json({ ok: true });
 });
 
 // --- Sync (cr-sqlite pod-to-pod) ---------------------------------------------
