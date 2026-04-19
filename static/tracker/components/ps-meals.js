@@ -643,22 +643,44 @@ class PsMeals extends HTMLElement {
     sr.querySelectorAll("[data-action='prev-week']").forEach(b => b.addEventListener("click", () => { this._weekOffset--; this.render(); }));
     sr.querySelectorAll("[data-action='next-week']").forEach(b => b.addEventListener("click", () => { this._weekOffset++; this.render(); }));
 
-    // Toggle meal log
+    // Toggle meal log (optimistic UI)
     sr.querySelectorAll("[data-action='toggle-log']").forEach(el => {
       el.addEventListener("click", async () => {
+        if (el.dataset.pending) return;
+        el.dataset.pending = "1";
         const { date, mealType, userId, mealOptionId, logId } = el.dataset;
-        if (logId) {
-          await tracker.unlogMeal(logId);
-        } else {
-          await tracker.logMeal({ date, mealType, mealOptionId });
+        const wasChecked = el.classList.contains("checked");
+        el.classList.toggle("checked");
+        const box = el.querySelector(".check-box");
+        if (box) box.textContent = wasChecked ? "" : "\u2713";
+        try {
+          if (logId) {
+            await tracker.unlogMeal(logId);
+          } else {
+            await tracker.logMeal({ date, mealType, mealOptionId });
+          }
+        } catch {
+          el.classList.toggle("checked");
+          if (box) box.textContent = wasChecked ? "\u2713" : "";
         }
+        delete el.dataset.pending;
       });
     });
 
-    // Vote
+    // Vote (optimistic UI)
     sr.querySelectorAll("[data-action='vote']").forEach(btn => {
       btn.addEventListener("click", async () => {
-        await tracker.voteMeal(btn.dataset.optionId, parseInt(btn.dataset.vote));
+        if (btn.dataset.pending) return;
+        btn.dataset.pending = "1";
+        const wasActive = btn.classList.contains("active");
+        btn.classList.toggle("active");
+        try {
+          await tracker.voteMeal(btn.dataset.optionId, parseInt(btn.dataset.vote));
+        } catch {
+          if (wasActive) btn.classList.add("active");
+          else btn.classList.remove("active");
+        }
+        delete btn.dataset.pending;
       });
     });
 
