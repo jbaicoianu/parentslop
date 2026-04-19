@@ -127,14 +127,10 @@ class PsMeals extends HTMLElement {
     this._generatingImageId = optionId;
     this.render();
     try {
-      const res = await tracker.apiFetch(`/api/meal-options/${optionId}/generate-image`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || "Image generation failed");
-      }
+      await tracker.apiFetch(`/api/meal-options/${optionId}/generate-image`, { method: "POST" });
     } catch (e) {
       console.error("Generate image error:", e);
-      alert("Image generation failed");
+      alert(e.message || "Image generation failed");
     }
     this._generatingImageId = null;
     this.render();

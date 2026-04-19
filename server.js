@@ -493,6 +493,9 @@ function writeFamilySnapshot(familyId) {
       } else if (table === "families") {
         // families table uses id, not family_id
         data.tables[table] = db.prepare(`SELECT * FROM families WHERE id = ?`).all(familyId);
+      } else if (table === "stores") {
+        // stores has no family_id column — keys are prefixed with "{familyId}:"
+        data.tables[table] = db.prepare(`SELECT * FROM stores WHERE key LIKE ?`).all(`${familyId}:%`);
       } else {
         data.tables[table] = db.prepare(`SELECT * FROM "${table}" WHERE family_id = ?`).all(familyId);
       }
