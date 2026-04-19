@@ -6,6 +6,10 @@ class PsMeals extends HTMLElement {
     this._view = "today"; // today | week | menu
     this._weekOffset = 0; // 0 = current week
     this._showAddForm = false;
+    this._editingOptionId = null;
+    this._pendingImageDataUrl = null; // staged image for add/edit
+    this._planMode = false; // drag-and-drop sidebar on week view
+    this._selectedMealForPlacement = null; // mobile tap-to-place
     this._unsubs = [];
   }
 
@@ -68,6 +72,90 @@ class PsMeals extends HTMLElement {
     return { breakfast: "\u2600", lunch: "\u2601", dinner: "\uD83C\uDF19" }[type] || "";
   }
 
+  // --- Image resize utility ---
+  _resizeImage(file, maxWidth = 400) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          let w = img.width, h = img.height;
+          if (w > maxWidth) { h = Math.round(h * maxWidth / w); w = maxWidth; }
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL("image/jpeg", 0.7));
+        };
+        img.onerror = reject;
+        img.src = e.target.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // --- Placeholder SVG ---
+  _renderPlaceholderSVG(name, mealTypes) {
+    const letter = (name || "?")[0].toUpperCase();
+    const primary = (mealTypes || [])[0] || "dinner";
+    const colors = {
+      breakfast: ["#f59e0b", "#d97706"],
+      lunch: ["#10b981", "#059669"],
+      dinner: ["#6366f1", "#4f46e5"],
+    };
+    const [c1, c2] = colors[primary] || colors.dinner;
+    return `<svg viewBox="0 0 120 90" xmlns="http://www.w3.org/2000/svg">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${c1}"/><stop offset="100%" stop-color="${c2}"/></linearGradient></defs>
+      <rect width="120" height="90" fill="url(#g)" rx="4"/>
+      <text x="60" y="52" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="36" font-weight="700" font-family="system-ui">${letter}</text>
+    </svg>`;
+  }
+
+  // --- Render meal image or placeholder ---
+  _renderMealImage(option, cssClass = "card-img") {
+    if (option.imageUrl) {
+      return `<img class="${cssClass}" src="${option.imageUrl}" alt="${option.name}" />`;
+    }
+    return `<div class="${cssClass} placeholder-svg">${this._renderPlaceholderSVG(option.name, option.mealTypes)}</div>`;
+  }
+
+  // --- Shared meal form (add + edit) ---
+  _renderMealForm(option) {
+    const isEdit = !!option;
+    const name = isEdit ? option.name : "";
+    const desc = isEdit ? (option.description || "") : "";
+    const types = isEdit ? (option.mealTypes || []) : [];
+    const imageUrl = this._pendingImageDataUrl !== null ? this._pendingImageDataUrl : (isEdit ? (option.imageUrl || "") : "");
+
+    return `
+      <div class="meal-form">
+        <input type="text" class="input" id="meal-name" placeholder="Meal name" value="${name.replace(/"/g, '&quot;')}" />
+        <input type="text" class="input" id="meal-desc" placeholder="Description (optional)" value="${desc.replace(/"/g, '&quot;')}" />
+        <div class="meal-type-checks">
+          <label><input type="checkbox" value="breakfast" ${types.includes("breakfast") ? "checked" : ""} /> Breakfast</label>
+          <label><input type="checkbox" value="lunch" ${types.includes("lunch") ? "checked" : ""} /> Lunch</label>
+          <label><input type="checkbox" value="dinner" ${types.includes("dinner") ? "checked" : ""} /> Dinner</label>
+        </div>
+        <div class="image-upload-section">
+          <div class="image-preview-row">
+            ${imageUrl
+              ? `<img class="image-preview" src="${imageUrl}" alt="Preview" /><button class="btn btn-small btn-danger" data-action="remove-image">\u2715</button>`
+              : `<div class="image-preview placeholder-svg">${this._renderPlaceholderSVG(name || "?", types)}</div>`}
+          </div>
+          <label class="btn btn-small btn-upload">
+            <input type="file" accept="image/*" id="meal-image-input" style="display:none" />
+            ${imageUrl ? "Change image" : "Add image"}
+          </label>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" data-action="${isEdit ? "save-edit" : "save-option"}">${isEdit ? "Save" : "Add"}</button>
+          <button class="btn" data-action="${isEdit ? "cancel-edit" : "cancel-add"}">Cancel</button>
+        </div>
+      </div>
+    `;
+  }
+
   // --- Today view ---
   _renderToday() {
     const today = this._todayStr();
@@ -108,7 +196,7 @@ class PsMeals extends HTMLElement {
           </div>
           <div class="slot-body">
             ${option
-              ? `<div class="planned-meal">${option.name}</div>
+              ? `<div class="planned-meal">${option.imageUrl ? `<img class="today-thumb" src="${option.imageUrl}" alt="" />` : ""}${option.name}</div>
                  ${planned.notes ? `<div class="meal-notes">${planned.notes}</div>` : ""}
                  <div class="log-checks">${logHTML}</div>`
               : `<div class="no-plan">No plan</div>`}
@@ -154,34 +242,66 @@ class PsMeals extends HTMLElement {
 
     const weekLabel = `${this._formatDate(dates[0])} \u2013 ${this._formatDate(dates[6])}`;
 
+    const planModeBtn = isAdmin ? `<button class="btn btn-small ${this._planMode ? "btn-active" : ""}" data-action="toggle-plan-mode">${this._planMode ? "\u2715 Close" : "\uD83D\uDCCB Plan"}</button>` : "";
+
+    const sidebarHTML = this._planMode ? this._renderPlanSidebar() : "";
+
     return `
       <div class="week-view">
         <div class="week-nav">
           <button class="week-btn" data-action="prev-week">\u2190</button>
           <span class="week-label">${weekLabel}</span>
           <button class="week-btn" data-action="next-week">\u2192</button>
+          ${planModeBtn}
         </div>
-        <div class="week-grid">
-          <div class="week-header-row">
-            <div class="week-corner"></div>
-            ${dates.map(d => `<div class="week-day-header ${d === today ? "today" : ""}">${this._dayLabel(d)}<br><span class="day-num">${d.slice(8)}</span></div>`).join("")}
+        <div class="week-layout ${this._planMode ? "with-sidebar" : ""}">
+          ${sidebarHTML}
+          <div class="week-grid">
+            <div class="week-header-row">
+              <div class="week-corner"></div>
+              ${dates.map(d => `<div class="week-day-header ${d === today ? "today" : ""}">${this._dayLabel(d)}<br><span class="day-num">${d.slice(8)}</span></div>`).join("")}
+            </div>
+            ${MEAL_TYPES.map(type => `
+              <div class="week-row">
+                <div class="week-type-label">${this._getMealTypeIcon(type)}</div>
+                ${dates.map(date => {
+                  const entry = allPlan.find(p => p.date === date && p.mealType === type);
+                  const opt = entry ? this._getOption(entry.mealOptionId) : null;
+                  const thumbHTML = opt && opt.imageUrl ? `<img class="week-thumb" src="${opt.imageUrl}" alt="" />` : "";
+                  return `<div class="week-cell ${date === today ? "today" : ""} ${isAdmin ? "clickable" : ""} ${this._planMode ? "drop-target" : ""}"
+                           data-action="${isAdmin ? "pick-meal" : ""}" data-date="${date}" data-meal-type="${type}"
+                           data-plan-id="${entry?.id || ""}"
+                           title="${opt ? opt.name : ""}">
+                    ${opt ? `${thumbHTML}<span class="cell-name">${opt.name}</span>` : ""}
+                  </div>`;
+                }).join("")}
+              </div>
+            `).join("")}
           </div>
-          ${MEAL_TYPES.map(type => `
-            <div class="week-row">
-              <div class="week-type-label">${this._getMealTypeIcon(type)}</div>
-              ${dates.map(date => {
-                const entry = allPlan.find(p => p.date === date && p.mealType === type);
-                const opt = entry ? this._getOption(entry.mealOptionId) : null;
-                return `<div class="week-cell ${date === today ? "today" : ""} ${isAdmin ? "clickable" : ""}"
-                         data-action="${isAdmin ? "pick-meal" : ""}" data-date="${date}" data-meal-type="${type}"
-                         data-plan-id="${entry?.id || ""}"
-                         title="${opt ? opt.name : ""}">
-                  ${opt ? `<span class="cell-name">${opt.name}</span>` : ""}
-                </div>`;
-              }).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  // --- Plan Mode sidebar ---
+  _renderPlanSidebar() {
+    const options = trackerStore.mealOptions.data.filter(o => !o.archived);
+    const selected = this._selectedMealForPlacement;
+    return `
+      <div class="plan-sidebar">
+        <div class="sidebar-title">Meals</div>
+        <div class="sidebar-list">
+          ${options.map(o => `
+            <div class="sidebar-item ${selected === o.id ? "selected" : ""}"
+                 draggable="true" data-option-id="${o.id}" data-action="tap-select-meal">
+              ${o.imageUrl
+                ? `<img class="sidebar-thumb" src="${o.imageUrl}" alt="" />`
+                : `<div class="sidebar-thumb placeholder-svg">${this._renderPlaceholderSVG(o.name, o.mealTypes)}</div>`}
+              <span class="sidebar-name">${o.name}</span>
             </div>
           `).join("")}
         </div>
+        ${selected ? `<div class="placement-hint">Tap a cell to place</div>` : ""}
       </div>
     `;
   }
@@ -193,52 +313,51 @@ class PsMeals extends HTMLElement {
     const isAdmin = tracker.isCurrentUserAdmin();
 
     const optionsHTML = options.map(o => {
+      if (this._editingOptionId === o.id) {
+        return `<div class="menu-card editing">${this._renderMealForm(o)}</div>`;
+      }
       const votes = tracker.getMealVoteSummary(o.id);
       const userVote = currentUser ? tracker.getUserMealVote(o.id, currentUser.id) : 0;
       const suggestor = trackerStore.users.data.find(u => u.id === o.suggestedBy);
       return `
-        <div class="menu-item">
-          <div class="menu-main">
+        <div class="menu-card">
+          ${this._renderMealImage(o)}
+          <div class="card-body">
             <div class="menu-name">${o.name}</div>
             ${o.description ? `<div class="menu-desc">${o.description}</div>` : ""}
             <div class="menu-tags">
-              ${(o.mealTypes || []).map(t => `<span class="meal-tag">${this._getMealTypeLabel(t)}</span>`).join("")}
+              ${(o.mealTypes || []).map(t => `<span class="meal-tag tag-${t}">${this._getMealTypeLabel(t)}</span>`).join("")}
               ${suggestor ? `<span class="suggested-by">by ${suggestor.name}</span>` : ""}
             </div>
           </div>
-          <div class="menu-votes">
-            <button class="vote-btn ${userVote === 1 ? "active up" : ""}" data-action="vote" data-option-id="${o.id}" data-vote="1">
-              \u25B2 <span class="vote-count">${votes.up || ""}</span>
-            </button>
-            <button class="vote-btn ${userVote === -1 ? "active down" : ""}" data-action="vote" data-option-id="${o.id}" data-vote="-1">
-              \u25BC <span class="vote-count">${votes.down || ""}</span>
-            </button>
-            ${isAdmin ? `<button class="archive-btn" data-action="archive" data-option-id="${o.id}" title="Archive">\u2715</button>` : ""}
+          <div class="card-footer">
+            <div class="menu-votes">
+              <button class="vote-btn ${userVote === 1 ? "active up" : ""}" data-action="vote" data-option-id="${o.id}" data-vote="1">
+                \u25B2 <span class="vote-count">${votes.up || ""}</span>
+              </button>
+              <button class="vote-btn ${userVote === -1 ? "active down" : ""}" data-action="vote" data-option-id="${o.id}" data-vote="-1">
+                \u25BC <span class="vote-count">${votes.down || ""}</span>
+              </button>
+            </div>
+            ${isAdmin ? `
+              <div class="admin-actions">
+                <button class="edit-btn" data-action="edit-option" data-option-id="${o.id}" title="Edit">\u270E</button>
+                <button class="archive-btn" data-action="archive" data-option-id="${o.id}" title="Archive">\u2715</button>
+              </div>
+            ` : ""}
           </div>
         </div>
       `;
     }).join("");
 
     const addFormHTML = this._showAddForm ? `
-      <div class="add-form">
-        <input type="text" class="input" id="meal-name" placeholder="Meal name" />
-        <input type="text" class="input" id="meal-desc" placeholder="Description (optional)" />
-        <div class="meal-type-checks">
-          <label><input type="checkbox" value="breakfast" /> Breakfast</label>
-          <label><input type="checkbox" value="lunch" /> Lunch</label>
-          <label><input type="checkbox" value="dinner" /> Dinner</label>
-        </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" data-action="save-option">Add</button>
-          <button class="btn" data-action="cancel-add">Cancel</button>
-        </div>
-      </div>
+      <div class="menu-card add-card">${this._renderMealForm(null)}</div>
     ` : `<button class="btn btn-add" data-action="show-add">+ Suggest a meal</button>`;
 
     return `
       <div class="menu-view">
         ${addFormHTML}
-        <div class="menu-list">${optionsHTML || '<div class="empty">No meals yet. Add one to get started!</div>'}</div>
+        <div class="menu-grid">${optionsHTML || '<div class="empty">No meals yet. Add one to get started!</div>'}</div>
       </div>
     `;
   }
@@ -247,7 +366,6 @@ class PsMeals extends HTMLElement {
   _renderPicker(date, mealType, planId) {
     const options = trackerStore.mealOptions.data.filter(o => !o.archived);
     const filtered = options.filter(o => o.mealTypes.length === 0 || o.mealTypes.includes(mealType));
-    // Sort by votes
     const sorted = filtered.sort((a, b) => {
       const va = tracker.getMealVoteSummary(a.id);
       const vb = tracker.getMealVoteSummary(b.id);
@@ -263,6 +381,7 @@ class PsMeals extends HTMLElement {
               const v = tracker.getMealVoteSummary(o.id);
               return `<button class="picker-item" data-action="select-meal" data-option-id="${o.id}"
                         data-date="${date}" data-meal-type="${mealType}" data-plan-id="${planId}">
+                ${o.imageUrl ? `<img class="picker-thumb" src="${o.imageUrl}" alt="" />` : ""}
                 <span class="picker-name">${o.name}</span>
                 <span class="picker-votes">\u25B2${v.up} \u25BC${v.down}</span>
               </button>`;
@@ -292,7 +411,8 @@ class PsMeals extends HTMLElement {
       .slot-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
       .slot-icon { font-size: 1.1rem; }
       .slot-label { font-size: 0.85rem; font-weight: 700; color: #a0a4be; text-transform: uppercase; letter-spacing: 0.04em; }
-      .planned-meal { font-size: 1rem; font-weight: 600; color: #e2e4f0; }
+      .planned-meal { font-size: 1rem; font-weight: 600; color: #e2e4f0; display: flex; align-items: center; gap: 8px; }
+      .today-thumb { width: 28px; height: 28px; border-radius: 6px; object-fit: cover; }
       .meal-notes { font-size: 0.78rem; color: #a0a4be; margin-top: 2px; }
       .no-plan { font-size: 0.85rem; color: #555; font-style: italic; }
       .log-checks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
@@ -309,10 +429,19 @@ class PsMeals extends HTMLElement {
       .slot-icon-mini { font-size: 0.9rem; }
 
       /* Week view */
-      .week-nav { display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 14px; }
+      .week-nav { display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
       .week-btn { background: #1a1c2a; border: 1px solid #25273a; color: #e2e4f0; padding: 6px 12px;
                   border-radius: 8px; cursor: pointer; font-size: 1rem; }
       .week-label { font-size: 0.85rem; font-weight: 600; color: #e2e4f0; min-width: 200px; text-align: center; }
+      .week-layout { display: block; }
+      .week-layout.with-sidebar { display: grid; grid-template-columns: 140px 1fr; gap: 10px; }
+      @media (max-width: 600px) {
+        .week-layout.with-sidebar { grid-template-columns: 1fr; }
+        .plan-sidebar { position: fixed; bottom: 0; left: 0; right: 0; max-height: 40vh; z-index: 100;
+                        border-radius: 16px 16px 0 0; border-bottom: none; overflow-y: auto;
+                        box-shadow: 0 -4px 20px rgba(0,0,0,0.5); }
+        .week-layout.with-sidebar .week-grid { padding-bottom: 160px; }
+      }
       .week-grid { display: grid; grid-template-columns: 30px repeat(7, 1fr); gap: 2px; }
       .week-header-row, .week-row { display: contents; }
       .week-corner { }
@@ -321,27 +450,57 @@ class PsMeals extends HTMLElement {
       .day-num { font-size: 0.68rem; opacity: 0.7; }
       .week-type-label { font-size: 0.8rem; display: flex; align-items: center; justify-content: center; }
       .week-cell { background: #12131f; border: 1px solid #1a1c2a; border-radius: 6px; min-height: 40px;
-                   padding: 4px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+                   padding: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; gap: 2px; }
       .week-cell.clickable { cursor: pointer; }
       .week-cell.clickable:hover { border-color: #4ade80; }
+      .week-cell.drop-target { transition: border-color 0.15s, background 0.15s; }
+      .week-cell.drag-over { border-color: #4ade80; background: rgba(74, 222, 128, 0.1); }
+      .week-thumb { width: 24px; height: 24px; border-radius: 4px; object-fit: cover; }
       .cell-name { font-size: 0.68rem; color: #e2e4f0; text-align: center; word-break: break-word; line-height: 1.2; }
 
-      /* Menu view */
-      .menu-list { display: flex; flex-direction: column; gap: 8px; }
-      .menu-item { display: flex; align-items: center; gap: 12px; background: #12131f; border: 1px solid #25273a;
-                   border-radius: 14px; padding: 12px 14px; }
-      .menu-main { flex: 1; min-width: 0; }
-      .menu-name { font-size: 0.95rem; font-weight: 600; color: #e2e4f0; }
-      .menu-desc { font-size: 0.78rem; color: #a0a4be; margin-top: 2px; }
-      .menu-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-      .meal-tag { font-size: 0.68rem; padding: 2px 8px; border-radius: 6px; background: #1a1c2a; color: #a0a4be; }
-      .suggested-by { font-size: 0.68rem; color: #666; }
-      .menu-votes { display: flex; flex-direction: column; gap: 4px; align-items: center; }
-      .vote-btn { background: #1a1c2a; border: 1px solid #25273a; border-radius: 8px; padding: 4px 10px;
-                  color: #a0a4be; cursor: pointer; font-size: 0.78rem; display: flex; align-items: center; gap: 4px; }
+      /* Plan sidebar */
+      .plan-sidebar { background: #12131f; border: 1px solid #25273a; border-radius: 12px; padding: 10px; overflow-y: auto; max-height: 400px; }
+      .sidebar-title { font-size: 0.78rem; font-weight: 700; color: #a0a4be; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+      .sidebar-list { display: flex; flex-direction: column; gap: 4px; }
+      .sidebar-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px;
+                      background: #1a1c2a; border: 1px solid #25273a; cursor: grab; font-size: 0.78rem; color: #e2e4f0; }
+      .sidebar-item:active { cursor: grabbing; }
+      .sidebar-item.selected { border-color: #4ade80; background: rgba(74, 222, 128, 0.1); }
+      .sidebar-thumb { width: 28px; height: 28px; border-radius: 6px; object-fit: cover; flex-shrink: 0; }
+      .sidebar-thumb.placeholder-svg { width: 28px; height: 28px; }
+      .sidebar-thumb.placeholder-svg svg { width: 100%; height: 100%; border-radius: 6px; }
+      .sidebar-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .placement-hint { text-align: center; font-size: 0.72rem; color: #4ade80; margin-top: 8px; padding: 4px; animation: pulse 1.5s infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+      /* Menu view — grid layout */
+      .menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+      .menu-card { background: #12131f; border: 1px solid #25273a; border-radius: 14px; overflow: hidden;
+                   display: flex; flex-direction: column; }
+      .menu-card.editing { grid-column: 1 / -1; }
+      .menu-card.add-card { grid-column: 1 / -1; }
+      .card-img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; }
+      .card-img.placeholder-svg { display: flex; align-items: center; justify-content: center; }
+      .card-img.placeholder-svg svg { width: 100%; height: 100%; }
+      .card-body { padding: 10px 12px 6px; flex: 1; }
+      .menu-name { font-size: 0.9rem; font-weight: 600; color: #e2e4f0; }
+      .menu-desc { font-size: 0.75rem; color: #a0a4be; margin-top: 2px; }
+      .menu-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+      .meal-tag { font-size: 0.65rem; padding: 2px 6px; border-radius: 6px; background: #1a1c2a; color: #a0a4be; }
+      .tag-breakfast { background: #422006; color: #fbbf24; }
+      .tag-lunch { background: #052e16; color: #34d399; }
+      .tag-dinner { background: #1e1b4b; color: #a5b4fc; }
+      .suggested-by { font-size: 0.65rem; color: #666; }
+      .card-footer { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px 10px; }
+      .menu-votes { display: flex; gap: 4px; align-items: center; }
+      .vote-btn { background: #1a1c2a; border: 1px solid #25273a; border-radius: 8px; padding: 4px 8px;
+                  color: #a0a4be; cursor: pointer; font-size: 0.75rem; display: flex; align-items: center; gap: 3px; }
       .vote-btn.active.up { background: #1a3a2a; border-color: #2d6b45; color: #4ade80; }
       .vote-btn.active.down { background: #3a1a1a; border-color: #6b2d2d; color: #f87171; }
-      .vote-count { font-size: 0.72rem; }
+      .vote-count { font-size: 0.7rem; }
+      .admin-actions { display: flex; gap: 4px; }
+      .edit-btn { background: none; border: none; color: #a0a4be; cursor: pointer; font-size: 0.85rem; padding: 4px; }
+      .edit-btn:hover { color: #4ade80; }
       .archive-btn { background: none; border: none; color: #666; cursor: pointer; font-size: 0.85rem; padding: 4px; }
       .archive-btn:hover { color: #f87171; }
 
@@ -349,17 +508,27 @@ class PsMeals extends HTMLElement {
                  border-radius: 12px; color: #a0a4be; cursor: pointer; font-size: 0.85rem; }
       .btn-add:hover { border-color: #4ade80; color: #4ade80; }
 
-      .add-form { background: #12131f; border: 1px solid #25273a; border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+      /* Meal form (add/edit) */
+      .meal-form { padding: 14px; }
       .input { width: 100%; padding: 8px 12px; background: #0d0e16; border: 1px solid #25273a; border-radius: 8px;
                color: #e2e4f0; font-size: 0.85rem; margin-bottom: 8px; box-sizing: border-box; }
       .meal-type-checks { display: flex; gap: 14px; margin-bottom: 10px; }
       .meal-type-checks label { font-size: 0.82rem; color: #a0a4be; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+      .image-upload-section { margin-bottom: 10px; }
+      .image-preview-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+      .image-preview { width: 80px; height: 60px; border-radius: 8px; object-fit: cover; }
+      .image-preview.placeholder-svg { width: 80px; height: 60px; }
+      .image-preview.placeholder-svg svg { width: 100%; height: 100%; border-radius: 8px; }
+      .btn-upload { cursor: pointer; }
       .form-actions { display: flex; gap: 8px; }
       .btn { padding: 6px 16px; border-radius: 8px; border: 1px solid #25273a; background: #1a1c2a;
              color: #e2e4f0; cursor: pointer; font-size: 0.82rem; }
       .btn-primary { background: #4ade80; color: #000; border: none; font-weight: 600; }
+      .btn-small { padding: 4px 10px; font-size: 0.75rem; }
+      .btn-danger { background: #3a1a1a; border-color: #6b2d2d; color: #f87171; }
+      .btn-active { background: #1a3a2a; border-color: #2d6b45; color: #4ade80; }
 
-      .empty { font-size: 0.85rem; color: #555; text-align: center; padding: 30px; font-style: italic; }
+      .empty { font-size: 0.85rem; color: #555; text-align: center; padding: 30px; font-style: italic; grid-column: 1 / -1; }
 
       /* Picker */
       .picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000;
@@ -370,12 +539,15 @@ class PsMeals extends HTMLElement {
       .picker-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
       .picker-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px;
                      background: #1a1c2a; border: 1px solid #25273a; border-radius: 10px; cursor: pointer;
-                     color: #e2e4f0; font-size: 0.85rem; }
+                     color: #e2e4f0; font-size: 0.85rem; gap: 8px; }
       .picker-item:hover { border-color: #4ade80; }
       .picker-item.remove { color: #f87171; justify-content: center; }
-      .picker-name { font-weight: 500; }
-      .picker-votes { font-size: 0.72rem; color: #a0a4be; }
+      .picker-thumb { width: 32px; height: 24px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
+      .picker-name { font-weight: 500; flex: 1; }
+      .picker-votes { font-size: 0.72rem; color: #a0a4be; white-space: nowrap; }
       .picker-close { width: 100%; }
+
+      .week-cell.today { border-color: rgba(74, 222, 128, 0.3); }
     `;
 
     let contentHTML;
@@ -407,6 +579,9 @@ class PsMeals extends HTMLElement {
       btn.addEventListener("click", () => {
         this._view = btn.dataset.tab;
         this._showAddForm = false;
+        this._editingOptionId = null;
+        this._pendingImageDataUrl = null;
+        this._selectedMealForPlacement = null;
         this.render();
       });
     });
@@ -443,12 +618,47 @@ class PsMeals extends HTMLElement {
       });
     });
 
+    // Edit option
+    sr.querySelectorAll("[data-action='edit-option']").forEach(btn => {
+      btn.addEventListener("click", () => {
+        this._editingOptionId = btn.dataset.optionId;
+        this._pendingImageDataUrl = null;
+        this.render();
+      });
+    });
+
+    // Cancel edit
+    sr.querySelectorAll("[data-action='cancel-edit']").forEach(b => {
+      b.addEventListener("click", () => {
+        this._editingOptionId = null;
+        this._pendingImageDataUrl = null;
+        this.render();
+      });
+    });
+
+    // Save edit
+    sr.querySelectorAll("[data-action='save-edit']").forEach(b => {
+      b.addEventListener("click", async () => {
+        const name = sr.getElementById("meal-name")?.value?.trim();
+        if (!name) return;
+        const desc = sr.getElementById("meal-desc")?.value?.trim() || "";
+        const types = [...sr.querySelectorAll(".meal-type-checks input:checked")].map(c => c.value);
+        const data = { name, description: desc, mealTypes: types };
+        if (this._pendingImageDataUrl !== null) {
+          data.imageUrl = this._pendingImageDataUrl;
+        }
+        await tracker.updateMealOption(this._editingOptionId, data);
+        this._editingOptionId = null;
+        this._pendingImageDataUrl = null;
+      });
+    });
+
     // Add form
     sr.querySelectorAll("[data-action='show-add']").forEach(b => {
-      b.addEventListener("click", () => { this._showAddForm = true; this.render(); });
+      b.addEventListener("click", () => { this._showAddForm = true; this._pendingImageDataUrl = null; this.render(); });
     });
     sr.querySelectorAll("[data-action='cancel-add']").forEach(b => {
-      b.addEventListener("click", () => { this._showAddForm = false; this.render(); });
+      b.addEventListener("click", () => { this._showAddForm = false; this._pendingImageDataUrl = null; this.render(); });
     });
     sr.querySelectorAll("[data-action='save-option']").forEach(b => {
       b.addEventListener("click", async () => {
@@ -456,16 +666,104 @@ class PsMeals extends HTMLElement {
         if (!name) return;
         const desc = sr.getElementById("meal-desc")?.value?.trim() || "";
         const types = [...sr.querySelectorAll(".meal-type-checks input:checked")].map(c => c.value);
-        await tracker.createMealOption({ name, description: desc, mealTypes: types });
+        const data = { name, description: desc, mealTypes: types };
+        if (this._pendingImageDataUrl) {
+          data.imageUrl = this._pendingImageDataUrl;
+        }
+        await tracker.createMealOption(data);
         this._showAddForm = false;
+        this._pendingImageDataUrl = null;
       });
     });
 
-    // Week cell click (picker)
-    sr.querySelectorAll("[data-action='pick-meal']").forEach(cell => {
-      cell.addEventListener("click", () => {
-        this._pickerState = { date: cell.dataset.date, mealType: cell.dataset.mealType, planId: cell.dataset.planId };
+    // Image upload
+    const imageInput = sr.getElementById("meal-image-input");
+    if (imageInput) {
+      imageInput.addEventListener("change", async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        this._pendingImageDataUrl = await this._resizeImage(file);
         this.render();
+      });
+    }
+
+    // Remove image
+    sr.querySelectorAll("[data-action='remove-image']").forEach(b => {
+      b.addEventListener("click", () => {
+        this._pendingImageDataUrl = "";
+        this.render();
+      });
+    });
+
+    // Week cell click (picker) — only when NOT in placement mode
+    sr.querySelectorAll("[data-action='pick-meal']").forEach(cell => {
+      cell.addEventListener("click", async () => {
+        // Mobile tap-to-place
+        if (this._selectedMealForPlacement) {
+          const { date, mealType, planId } = cell.dataset;
+          if (planId) {
+            await tracker.updateMealPlan(planId, { mealOptionId: this._selectedMealForPlacement });
+          } else {
+            await tracker.addMealPlan({ date, mealType, mealOptionId: this._selectedMealForPlacement });
+          }
+          this._selectedMealForPlacement = null;
+          return;
+        }
+        // Normal picker
+        if (!this._planMode) {
+          this._pickerState = { date: cell.dataset.date, mealType: cell.dataset.mealType, planId: cell.dataset.planId };
+          this.render();
+        }
+      });
+    });
+
+    // Plan mode toggle
+    sr.querySelectorAll("[data-action='toggle-plan-mode']").forEach(b => {
+      b.addEventListener("click", () => {
+        this._planMode = !this._planMode;
+        this._selectedMealForPlacement = null;
+        this.render();
+      });
+    });
+
+    // Sidebar drag start
+    sr.querySelectorAll(".sidebar-item[draggable='true']").forEach(item => {
+      item.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", item.dataset.optionId);
+        e.dataTransfer.effectAllowed = "copy";
+      });
+    });
+
+    // Sidebar tap-to-select (mobile fallback)
+    sr.querySelectorAll("[data-action='tap-select-meal']").forEach(item => {
+      item.addEventListener("click", () => {
+        const id = item.dataset.optionId;
+        this._selectedMealForPlacement = this._selectedMealForPlacement === id ? null : id;
+        this.render();
+      });
+    });
+
+    // Drop targets (week cells)
+    sr.querySelectorAll(".week-cell.drop-target").forEach(cell => {
+      cell.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        cell.classList.add("drag-over");
+      });
+      cell.addEventListener("dragleave", () => {
+        cell.classList.remove("drag-over");
+      });
+      cell.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        cell.classList.remove("drag-over");
+        const optionId = e.dataTransfer.getData("text/plain");
+        if (!optionId) return;
+        const { date, mealType, planId } = cell.dataset;
+        if (planId) {
+          await tracker.updateMealPlan(planId, { mealOptionId: optionId });
+        } else {
+          await tracker.addMealPlan({ date, mealType, mealOptionId: optionId });
+        }
       });
     });
 

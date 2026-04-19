@@ -385,6 +385,11 @@ function initDb() {
     )
   `);
 
+  // Migrate: add image_url column to meal_options
+  try { db.prepare("SELECT image_url FROM meal_options LIMIT 1").get(); } catch {
+    db.exec("ALTER TABLE meal_options ADD COLUMN image_url TEXT DEFAULT ''");
+  }
+
   // Derived table (NOT a CRR — recomputed from events)
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_balances (
@@ -1301,7 +1306,7 @@ function mealOptionRowToObj(row) {
   return {
     id: row.id, familyId: row.family_id, name: row.name, description: row.description,
     mealTypes: jsonOrDefault(row.meal_types, []), suggestedBy: row.suggested_by,
-    archived: !!row.archived, createdAt: row.created_at,
+    archived: !!row.archived, createdAt: row.created_at, imageUrl: row.image_url || '',
   };
 }
 
@@ -2366,11 +2371,11 @@ app.post("/api/meal-options", requireFamilyAuth, async (req, res) => {
   const rowData = {
     family_id: req.familyId, name: t.name || '', description: t.description || '',
     meal_types: JSON.stringify(t.mealTypes || []), suggested_by: req.memberId || '',
-    archived: 0, created_at: now,
+    archived: 0, created_at: now, image_url: t.imageUrl || '',
   };
-  db.prepare(`INSERT INTO meal_options (id, family_id, name, description, meal_types, suggested_by, archived, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, rowData.family_id, rowData.name, rowData.description, rowData.meal_types, rowData.suggested_by, rowData.archived, rowData.created_at);
+  db.prepare(`INSERT INTO meal_options (id, family_id, name, description, meal_types, suggested_by, archived, created_at, image_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, rowData.family_id, rowData.name, rowData.description, rowData.meal_types, rowData.suggested_by, rowData.archived, rowData.created_at, rowData.image_url);
   emitEvent(req.familyId, "meal_options", id, "insert", rowData);
   const row = db.prepare("SELECT * FROM meal_options WHERE id = ?").get(id);
   const obj = mealOptionRowToObj(row);
@@ -2386,9 +2391,10 @@ app.put("/api/meal-options/:id", requireFamilyAuth, requireAdmin, async (req, re
     name: t.name ?? existing.name,
     description: t.description ?? existing.description,
     meal_types: t.mealTypes ? JSON.stringify(t.mealTypes) : existing.meal_types,
+    image_url: t.imageUrl ?? existing.image_url,
   };
-  db.prepare("UPDATE meal_options SET name = ?, description = ?, meal_types = ? WHERE id = ? AND family_id = ?")
-    .run(updatedFields.name, updatedFields.description, updatedFields.meal_types, req.params.id, req.familyId);
+  db.prepare("UPDATE meal_options SET name = ?, description = ?, meal_types = ?, image_url = ? WHERE id = ? AND family_id = ?")
+    .run(updatedFields.name, updatedFields.description, updatedFields.meal_types, updatedFields.image_url, req.params.id, req.familyId);
   emitEvent(req.familyId, "meal_options", req.params.id, "update", updatedFields);
   const row = db.prepare("SELECT * FROM meal_options WHERE id = ?").get(req.params.id);
   broadcastSSE(req.familyId, "meals:changed", {});
