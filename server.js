@@ -2394,7 +2394,7 @@ app.post("/api/meal-options", requireFamilyAuth, async (req, res) => {
         const formData = new FormData();
         formData.append("prompt", prompt);
         formData.append("output_format", "jpeg");
-        formData.append("aspect_ratio", "4:3");
+        formData.append("aspect_ratio", "3:2");
         fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
           method: "POST",
           headers: { "Authorization": `Bearer ${apiKeyRow.value}`, "Accept": "image/*" },
@@ -2447,7 +2447,7 @@ app.post("/api/meal-options/:id/generate-image", requireFamilyAuth, requireAdmin
     const formData = new FormData();
     formData.append("prompt", prompt);
     formData.append("output_format", "jpeg");
-    formData.append("aspect_ratio", "4:3");
+    formData.append("aspect_ratio", "3:2");
 
     const stabilityRes = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
       method: "POST",
@@ -2461,7 +2461,7 @@ app.post("/api/meal-options/:id/generate-image", requireFamilyAuth, requireAdmin
     if (!stabilityRes.ok) {
       const errText = await stabilityRes.text();
       console.error("Stability API error:", stabilityRes.status, errText);
-      return res.status(502).json({ error: `Stability API error: ${stabilityRes.status}` });
+      return res.status(502).json({ error: `Stability API error (${stabilityRes.status}): ${errText}` });
     }
 
     const imageBuffer = Buffer.from(await stabilityRes.arrayBuffer());
