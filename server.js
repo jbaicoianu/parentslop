@@ -1337,13 +1337,23 @@ function mealLogRowToObj(row) {
 
 // --- Server-side reward computation ------------------------------------------
 
-function dateKeyServer(iso) {
+// Day/week keys. offsetMin is the client's getTimezoneOffset() (UTC - local, in
+// minutes); when given, keys are computed in the client's local time instead of
+// the server's (which is UTC in production).
+function localDateServer(iso, offsetMin) {
   const d = new Date(iso);
+  if (offsetMin == null || isNaN(offsetMin)) return d;
+  const shifted = new Date(d.getTime() - offsetMin * 60000);
+  return new Date(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+}
+
+function dateKeyServer(iso, offsetMin) {
+  const d = localDateServer(iso, offsetMin);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function weekKeyServer(iso) {
-  const d = new Date(iso);
+function weekKeyServer(iso, offsetMin) {
+  const d = localDateServer(iso, offsetMin);
   const local = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const jan1 = new Date(local.getFullYear(), 0, 1);
   const week = Math.ceil(((local - jan1) / 86400000 + jan1.getDay() + 1) / 7);
@@ -1363,59 +1373,57 @@ function prevKeyServer(key, unit) {
   return `${year}-W${String(week).padStart(2, "0")}`;
 }
 
-function calcStreakServer(familyId, taskId, userId) {
+// Returns { streak, currentDone }. The current period (today / this week) counts
+// toward the streak if completed, but not having done it yet doesn't break the
+// streak — it stays alive through the previous period until the period ends.
+function calcStreakServer(familyId, taskId, userId, offsetMin) {
+  const none = { streak: 0, currentDone: false };
   const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?").get(taskId, familyId);
-  if (!task) return 0;
-  if (task.recurrence === "transient") return 0;
+  if (!task) return none;
+  if (task.recurrence === "transient") return none;
 
   const completions = db.prepare(
     "SELECT completed_at FROM completions WHERE family_id = ? AND task_id = ? AND user_id = ? AND status = 'approved' ORDER BY completed_at DESC"
   ).all(familyId, taskId, userId);
 
-  if (completions.length === 0) return 0;
+  if (completions.length === 0) return none;
 
   const isWeekly = task.recurrence === "weekly";
+  const isDaily = !isWeekly;
   const keyFn = isWeekly ? weekKeyServer : dateKeyServer;
-  const keys = [...new Set(completions.map((c) => keyFn(c.completed_at)))].sort().reverse();
-
-  const todayKey = keyFn(new Date().toISOString());
-  let streak = 0;
-  let expected = todayKey;
+  const keys = [...new Set(completions.map((c) => keyFn(c.completed_at, offsetMin)))].sort().reverse();
   const activeDays = jsonOrDefault(task.active_days, []);
   const hasActiveDays = activeDays.length > 0;
-  const isDaily = !isWeekly;
 
-  if (isDaily && hasActiveDays) {
-    let skipped = 0;
-    while (skipped < 6) {
-      const [ey, em, ed] = expected.split("-").map(Number);
-      const dow = new Date(ey, em - 1, ed).getDay();
-      if (activeDays.includes(dow)) break;
-      expected = prevKeyServer(expected, "day");
-      skipped++;
+  // Walk back to the nearest active day (inclusive)
+  const snapToActive = (key) => {
+    if (!isDaily || !hasActiveDays) return key;
+    for (let skipped = 0; skipped < 6; skipped++) {
+      const [ey, em, ed] = key.split("-").map(Number);
+      if (activeDays.includes(new Date(ey, em - 1, ed).getDay())) break;
+      key = prevKeyServer(key, "day");
     }
-  }
+    return key;
+  };
+  const step = (key) => snapToActive(prevKeyServer(key, isDaily ? "day" : "week"));
 
+  const todayKey = keyFn(new Date().toISOString(), offsetMin);
+  let expected = snapToActive(todayKey);
+  const currentDone = keys[0] === expected;
+  // Grace: the current period is still open, so start from the previous one
+  if (!currentDone && expected === todayKey) expected = step(expected);
+
+  let streak = 0;
   for (const k of keys) {
     if (k === expected) {
       streak++;
-      expected = prevKeyServer(expected, isDaily ? "day" : "week");
-      if (isDaily && hasActiveDays) {
-        let skipped = 0;
-        while (skipped < 6) {
-          const [ey, em, ed] = expected.split("-").map(Number);
-          const dow = new Date(ey, em - 1, ed).getDay();
-          if (activeDays.includes(dow)) break;
-          expected = prevKeyServer(expected, "day");
-          skipped++;
-        }
-      }
+      expected = step(expected);
     } else if (k < expected) {
       break;
     }
   }
 
-  return streak;
+  return { streak, currentDone };
 }
 
 function computeRewards(task, streakMultiplier, timerMultiplier) {
@@ -1792,8 +1800,10 @@ app.post("/api/completions", requireFamilyAuth, async (req, res) => {
     }
   }
 
-  const streak = calcStreakServer(req.familyId, taskId, userId);
-  const newStreak = streak + 1;
+  const tzOffset = parseInt(req.headers['x-timezone-offset'], 10);
+  const { streak, currentDone } = calcStreakServer(req.familyId, taskId, userId, isNaN(tzOffset) ? null : tzOffset);
+  // This completion extends the streak unless the current period was already counted
+  const newStreak = currentDone ? streak : streak + 1;
 
   let streakMultiplier = 1;
   const streakBonus = jsonOrDefault(task.streak_bonus, null);

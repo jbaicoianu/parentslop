@@ -407,6 +407,9 @@ function prevKey(key, unit) {
   return `${year}-W${String(week).padStart(2, "0")}`;
 }
 
+// The current period (today / this week) counts toward the streak if completed,
+// but not having done it yet doesn't break the streak — it stays alive through
+// the previous period until the period ends.
 function calcStreak(taskId, userId) {
   const task = _state.tasks.find((t) => t.id === taskId);
   if (!task) return 0;
@@ -420,38 +423,31 @@ function calcStreak(taskId, userId) {
 
   const keyFn = task.recurrence === "weekly" ? weekKey : dateKey;
   const keys = [...new Set(completions.map((c) => keyFn(c.completedAt)))].sort().reverse();
-
-  const todayKey = keyFn(new Date().toISOString());
-  let streak = 0;
-  let expected = todayKey;
   const activeDays = task.activeDays && task.activeDays.length > 0 ? task.activeDays : null;
   const isDaily = task.recurrence !== "weekly";
 
-  if (isDaily && activeDays) {
-    let skipped = 0;
-    while (skipped < 6) {
-      const [ey, em, ed] = expected.split("-").map(Number);
-      const dow = new Date(ey, em - 1, ed).getDay();
-      if (activeDays.includes(dow)) break;
-      expected = prevKey(expected, "day");
-      skipped++;
+  // Walk back to the nearest active day (inclusive)
+  const snapToActive = (key) => {
+    if (!isDaily || !activeDays) return key;
+    for (let skipped = 0; skipped < 6; skipped++) {
+      const [ey, em, ed] = key.split("-").map(Number);
+      if (activeDays.includes(new Date(ey, em - 1, ed).getDay())) break;
+      key = prevKey(key, "day");
     }
-  }
+    return key;
+  };
+  const step = (key) => snapToActive(prevKey(key, isDaily ? "day" : "week"));
 
+  const todayKey = keyFn(new Date().toISOString());
+  let expected = snapToActive(todayKey);
+  // Grace: the current period is still open, so start from the previous one
+  if (keys[0] !== expected && expected === todayKey) expected = step(expected);
+
+  let streak = 0;
   for (const k of keys) {
     if (k === expected) {
       streak++;
-      expected = prevKey(expected, isDaily ? "day" : "week");
-      if (isDaily && activeDays) {
-        let skipped = 0;
-        while (skipped < 6) {
-          const [ey, em, ed] = expected.split("-").map(Number);
-          const dow = new Date(ey, em - 1, ed).getDay();
-          if (activeDays.includes(dow)) break;
-          expected = prevKey(expected, "day");
-          skipped++;
-        }
-      }
+      expected = step(expected);
     } else if (k < expected) {
       break;
     }
