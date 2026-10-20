@@ -8,6 +8,7 @@
 //   tools/feedback done <id> <note>    # mark feedback as completed
 //   tools/feedback --remote list       # list from remote (parentslop.com)
 //   tools/feedback --remote done <id> <note>
+//   tools/feedback pull                # copy remote feedback into local DB
 //
 // Remote auth env vars:
 //   PARENTSLOP_URL      (default: https://parentslop.com)
@@ -78,6 +79,41 @@ function localDone(id, note) {
   return row;
 }
 
+function localUpsert(rows) {
+  const db = openDb();
+  const existing = new Map(db.prepare("SELECT id, completed_at FROM feedback").all().map(r => [r.id, r]));
+  // Remote wins for content; a local completion is kept if remote is still open
+  const upsert = db.prepare(`
+    INSERT INTO feedback (id, text, user_id, user_name, current_view, user_agent, created_at, completed_at, resolution_note, family_id)
+    VALUES (@id, @text, @user_id, @user_name, @current_view, @user_agent, @created_at, @completed_at, @resolution_note, @family_id)
+    ON CONFLICT(id) DO UPDATE SET
+      text = excluded.text, user_id = excluded.user_id, user_name = excluded.user_name,
+      current_view = excluded.current_view, user_agent = excluded.user_agent,
+      created_at = excluded.created_at, family_id = excluded.family_id,
+      completed_at = COALESCE(excluded.completed_at, feedback.completed_at),
+      resolution_note = COALESCE(excluded.resolution_note, feedback.resolution_note)
+  `);
+  const stats = { added: 0, updated: 0, localOnlyDone: [] };
+  db.transaction(() => {
+    for (const r of rows) {
+      const prev = existing.get(r.id);
+      if (!prev) stats.added++;
+      else {
+        stats.updated++;
+        if (prev.completed_at && !r.completed_at) stats.localOnlyDone.push(r);
+      }
+      upsert.run({
+        id: r.id, text: r.text ?? "", user_id: r.user_id ?? null, user_name: r.user_name ?? null,
+        current_view: r.current_view ?? null, user_agent: r.user_agent ?? null,
+        created_at: r.created_at ?? null, completed_at: r.completed_at ?? null,
+        resolution_note: r.resolution_note ?? null, family_id: r.family_id ?? null,
+      });
+    }
+  })();
+  db.close();
+  return stats;
+}
+
 // ---- Remote API access ----
 
 async function remoteFetch(urlPath, options = {}) {
@@ -116,17 +152,21 @@ async function remoteLogin() {
 
   // Extract session cookie
   const setCookie = loginRes.headers.get("set-cookie") || "";
-  const match = setCookie.match(/connect\.sid=([^;]+)/);
+  const match = setCookie.match(/session=([^;]+)/);
   if (!match) {
     console.error(`${c.red}No session cookie in login response${c.reset}`);
     process.exit(1);
   }
-  _sessionCookie = `connect.sid=${match[1]}`;
+  _sessionCookie = `session=${match[1]}`;
 
-  // Select admin member
-  const members = loginBody.members || [];
+  // Fetch members via /api/auth/me
+  const meRes = await remoteFetch("/api/auth/me", {
+    headers: { Cookie: _sessionCookie },
+  });
+  const meBody = await meRes.json();
+  const members = meBody.members || [];
   const member = members.find(m =>
-    m.name.toLowerCase() === memberName.toLowerCase() ||
+    m.displayName.toLowerCase() === memberName.toLowerCase() ||
     m.id === memberName
   );
   if (!member) {
@@ -213,6 +253,13 @@ async function main() {
         const rows = localList(includeCompleted);
         printFeedback(rows, includeCompleted);
       }
+    } else if (command === "pull") {
+      const rows = await remoteList();
+      const stats = localUpsert(rows);
+      console.log(`${c.green}Pulled ${rows.length} items: ${stats.added} added, ${stats.updated} updated.${c.reset}`);
+      for (const r of stats.localOnlyDone) {
+        console.log(`  ${c.yellow}${r.id.slice(0, 8)}${c.reset} done locally but open on remote: ${r.text.slice(0, 60)}`);
+      }
     } else if (command === "done") {
       const id = filtered[1];
       const note = filtered.slice(2).join(" ");
@@ -229,7 +276,7 @@ async function main() {
       }
     } else {
       console.error(`Unknown command: ${command}`);
-      console.error("Usage: tools/feedback [list|all|done <id> <note>] [--remote]");
+      console.error("Usage: tools/feedback [list|all|pull|done <id> <note>] [--remote]");
       process.exit(1);
     }
   } catch (err) {
