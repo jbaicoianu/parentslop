@@ -1,18 +1,9 @@
 // ps-timer-tray: Non-modal multi-timer system
 // Manages concurrent timers as minimized pills + expandable card view
 
+// Guided animation scripts. "toothbrush-guided" is built per user from their
+// brushing pattern instead (see _animationFor).
 const ANIMATION_SCRIPTS = {
-  "toothbrush-guided": {
-    baseAnimation: "toothbrush",
-    stages: [
-      { label: "Upper left",  fraction: 1/6, visualClass: "stage-upper-left",  sound: "stageChime" },
-      { label: "Upper front", fraction: 1/6, visualClass: "stage-upper-front", sound: "stageChime" },
-      { label: "Upper right", fraction: 1/6, visualClass: "stage-upper-right", sound: "stageChime" },
-      { label: "Lower left",  fraction: 1/6, visualClass: "stage-lower-left",  sound: "stageChime" },
-      { label: "Lower front", fraction: 1/6, visualClass: "stage-lower-front", sound: "stageChime" },
-      { label: "Lower right", fraction: 1/6, visualClass: "stage-lower-right", sound: "stageChime" },
-    ],
-  },
   "exercise-guided": {
     baseAnimation: "exercise",
     encouragement: { intervalSeconds: 30, sound: "encourage" },
@@ -129,7 +120,10 @@ class PsTimerTray extends HTMLElement {
       timerMode: task.timerBonus.mode || "under",
       tickSound: task.timerBonus.tickSound || "click",
       hitSound: task.timerBonus.hitSound || "success",
-      animation: task.timerBonus.animationOverrides?.[userId] ?? (task.timerBonus.animation || "none"),
+      ...this._animationFor(task, userId),
+      claimed: new Set(), // self-report bonus criteria ids
+      _activeExtra: null, // bonus round in progress (opt-in after the target)
+      _extrasDone: new Set(),
       startTime: performance.now(),
       elapsed: 0,
       targetHitPlayed: false,
@@ -210,7 +204,7 @@ class PsTimerTray extends HTMLElement {
 
     // If paused, use the frozen elapsed; otherwise use live
     const elapsed = Math.round(timer.paused ? timer.pausedElapsed : timer.elapsed);
-    const result = await tracker.completeTask(timer.taskId, timer.userId, elapsed);
+    const result = await tracker.completeTask(timer.taskId, timer.userId, elapsed, [...timer.claimed]);
 
     if (result) {
       const bonusApplied = result.timerMultiplier > 1;
@@ -262,8 +256,57 @@ class PsTimerTray extends HTMLElement {
 
   // --- Animation script helpers ---
 
-  _getScript(animation) {
-    return ANIMATION_SCRIPTS[animation] || null;
+  // Animation key + guided script for a user's timer
+  _animationFor(task, userId) {
+    const tb = task.timerBonus;
+    const animation = tb.animationOverrides?.[userId] ?? (tb.animation || "none");
+    if (animation !== "toothbrush-guided") return { animation, script: ANIMATION_SCRIPTS[animation] || null, extras: [] };
+
+    const { steps, extras } = tracker.resolveBrushPattern(tb.brushPatternOverrides?.[userId] ?? tb.brushPattern);
+    const totalWeight = steps.reduce((sum, st) => sum + st.weight, 0);
+    return {
+      animation,
+      script: {
+        baseAnimation: "toothbrush",
+        stages: steps.map((st) => ({ ...st, fraction: st.weight / totalWeight, visualClass: `stage-${st.zone}`, sound: "stageChime" })),
+      },
+      // Untimed bonus rounds after the target (floss, tongue)
+      extras,
+    };
+  }
+
+  _getScript(timer) {
+    return timer.script || null;
+  }
+
+  // Bonus round panel: a button per round to opt in, or controls for the active one
+  _bonusRoundHtml(timer) {
+    const active = timer._activeExtra;
+    if (active) {
+      const linked = this._roundCriterion(timer, active);
+      return `
+        ${linked ? `<span class="bonus-round-reward">${linked.label} ×${linked.multiplier}</span>` : ""}
+        <div class="bonus-round-actions">
+          <button class="timer-btn btn-round-back" data-round-action="back">Back</button>
+          <button class="timer-btn btn-round-done" data-round-action="done">Did it!</button>
+        </div>`;
+    }
+    return `
+      <div class="bonus-round-actions">
+        ${timer.extras.map((x) => {
+          const done = timer._extrasDone.has(x);
+          const linked = this._roundCriterion(timer, x);
+          return `<button class="timer-btn btn-round-pick${done ? " done" : ""}" data-round-pick="${x}" ${done ? "disabled" : ""}>
+            ${done ? "✓" : "+"} ${tracker.BRUSH_EXTRAS[x]}${linked && !done ? ` <span class="round-mult">×${linked.multiplier}</span>` : ""}
+          </button>`;
+        }).join("")}
+      </div>`;
+  }
+
+  // Self-report bonus criterion tied to a bonus round (e.g. "Flossed" → floss)
+  _roundCriterion(timer, extra) {
+    const task = trackerStore.tasks.data.find((t) => t.id === timer.taskId);
+    return (task?.bonusCriteria || []).find((bc) => bc.selfReport && bc.extra === extra) || null;
   }
 
   _getStageIndex(elapsed, targetSeconds, script) {
@@ -292,7 +335,7 @@ class PsTimerTray extends HTMLElement {
       timer.elapsed = (now - timer.startTime) / 1000;
 
       // Stage transitions and encouragement for guided animations
-      const script = this._getScript(timer.animation);
+      const script = this._getScript(timer);
       if (script) {
         const newStage = this._getStageIndex(timer.elapsed, timer.targetSeconds, script);
         if (newStage !== timer._stageIndex) {
@@ -489,7 +532,7 @@ class PsTimerTray extends HTMLElement {
       }
 
       // Update segmented ring (guided animations)
-      const ringScript = this._getScript(timer.animation);
+      const ringScript = this._getScript(timer);
       if (ringScript && !ring) {
         const gap = 4;
         const allSegsDone = elapsed >= timer.targetSeconds;
@@ -539,7 +582,7 @@ class PsTimerTray extends HTMLElement {
         }
 
         // Guided animation: swap visual class on animation container
-        const script = this._getScript(timer.animation);
+        const script = this._getScript(timer);
         if (script) {
           const stage = script.stages[timer._stageIndex];
           if (stage) {
@@ -551,25 +594,46 @@ class PsTimerTray extends HTMLElement {
           }
         }
 
-        // Teeth diagram: zone highlighting + brush positioning
-        if (timer.animation === "toothbrush-guided") {
+        // Teeth diagram: zone highlighting, brush position/motion, bonus rounds
+        if (timer.animation === "toothbrush-guided" && script) {
           const allDone = elapsed >= timer.targetSeconds;
+          const stage = script.stages[timer._stageIndex];
+          const extra = allDone ? timer._activeExtra : null;
+          const activeZone = allDone ? extra : stage.zone;
+          const doneZones = new Set((allDone ? script.stages : script.stages.slice(0, timer._stageIndex)).map((st) => st.zone));
+          if (timer._extrasDone.has("tongue")) doneZones.add("tongue");
           animEl.querySelectorAll(".tooth-zone").forEach((zone) => {
-            const zoneIdx = parseInt(zone.dataset.stage);
-            zone.classList.toggle("zone-active", !allDone && zoneIdx === timer._stageIndex);
-            zone.classList.toggle("zone-done", allDone || zoneIdx < timer._stageIndex);
+            const z = zone.dataset.zone;
+            zone.classList.toggle("zone-active", z === activeZone);
+            zone.classList.toggle("zone-done", z !== activeZone && doneZones.has(z));
           });
+
           const brush = animEl.querySelector("#teeth-brush");
           if (brush) {
-            if (allDone) {
-              brush.style.opacity = "0";
-            } else {
-              brush.style.opacity = "1";
-              const pos = PsTimerTray.BRUSH_POSITIONS[timer._stageIndex] || [90, 50, 1];
+            const brushing = !allDone || extra === "tongue";
+            brush.style.opacity = brushing ? "1" : "0";
+            if (brushing) {
+              const pos = PsTimerTray.BRUSH_POSITIONS[activeZone] || [76, 50, 1];
               brush.setAttribute("transform", `translate(${pos[0]}, ${pos[1]}) scale(${pos[2]}, 1)`);
-              // Alternate scrub direction every ~8s (20 strokes)
-              const useH = Math.floor(elapsed / 8) % 2 === 1;
-              brush.classList.toggle("scrub-h", useH);
+              // "alternate" switches between up-down and back-forth every ~8s (20 strokes)
+              const motion = extra === "tongue" ? "sweep"
+                : stage.motion === "alternate" ? (Math.floor(elapsed / 8) % 2 === 1 ? "back-and-forth" : "up-and-down")
+                : stage.motion;
+              if (brush.dataset.motion !== motion) brush.dataset.motion = motion;
+            }
+          }
+
+          // Floss round: walk the pick through each gap between teeth, on a loop
+          // Open wide and stick the tongue out for the tongue round
+          animEl.querySelector(".anim-teeth-diagram")?.classList.toggle("mouth-open", extra === "tongue");
+
+          const floss = animEl.querySelector("#teeth-floss");
+          if (floss) {
+            floss.style.opacity = extra === "floss" ? "1" : "0";
+            if (extra === "floss") {
+              const gaps = PsTimerTray.FLOSS_GAPS;
+              const gap = gaps[Math.floor(elapsed / 0.9) % gaps.length];
+              floss.setAttribute("transform", `translate(${gap[0]}, ${gap[1]})`);
             }
           }
         }
@@ -578,17 +642,29 @@ class PsTimerTray extends HTMLElement {
       // Update stage label and dots
       const stageLabel = this.shadowRoot.getElementById("card-stage-label");
       const stageDots = this.shadowRoot.getElementById("card-stage-dots");
-      const script = this._getScript(timer.animation);
+      const script = this._getScript(timer);
+      // Bonus rounds run once the target is reached
+      const extras = timer.extras || [];
+      const inRounds = extras.length > 0 && elapsed >= timer.targetSeconds;
+      const extra = inRounds ? timer._activeExtra : null;
       if (script && stageLabel) {
-        stageLabel.textContent = script.stages[timer._stageIndex]?.label || "";
+        stageLabel.textContent = !inRounds ? (script.stages[timer._stageIndex]?.label || "")
+          : extra ? `Bonus round: ${tracker.BRUSH_EXTRAS[extra]}`
+          : timer._extrasDone.size === extras.length ? "All bonus rounds done!"
+          : "Brushing done! Bonus rounds?";
       }
       if (script && stageDots) {
-        const dots = stageDots.querySelectorAll(".stage-dot");
-        dots.forEach((dot, i) => {
-          dot.classList.toggle("done", i < timer._stageIndex);
-          dot.classList.toggle("current", i === timer._stageIndex);
+        stageDots.querySelectorAll(".stage-dot:not(.extra-dot)").forEach((dot, i) => {
+          dot.classList.toggle("done", inRounds || i < timer._stageIndex);
+          dot.classList.toggle("current", !inRounds && i === timer._stageIndex);
+        });
+        stageDots.querySelectorAll(".extra-dot").forEach((dot) => {
+          dot.classList.toggle("done", timer._extrasDone.has(dot.dataset.extra));
+          dot.classList.toggle("current", dot.dataset.extra === extra);
         });
       }
+      const roundEl = this.shadowRoot.getElementById("card-bonus-round");
+      if (roundEl) roundEl.style.display = inRounds ? "" : "none";
 
       // Update pause button state
       if (pauseBtn) {
@@ -708,7 +784,10 @@ class PsTimerTray extends HTMLElement {
           timerMode: task.timerBonus.mode || "under",
           tickSound: task.timerBonus.tickSound || "click",
           hitSound: task.timerBonus.hitSound || "success",
-          animation: task.timerBonus.animationOverrides?.[entry.userId] ?? (task.timerBonus.animation || "none"),
+          ...this._animationFor(task, entry.userId),
+          claimed: new Set(),
+          _activeExtra: null,
+          _extrasDone: new Set(),
           startTime: performance.now() - elapsed * 1000,
           elapsed,
           targetHitPlayed: false,
@@ -868,7 +947,7 @@ class PsTimerTray extends HTMLElement {
             <div class="ring-container">
               <svg class="ring-svg" viewBox="0 0 180 180">
                 ${(() => {
-                  const script = this._getScript(timer.animation);
+                  const script = this._getScript(timer);
                   return script
                     ? this._getSegmentedRingSvg(script, radius, circumference)
                     : `<circle class="ring-bg" cx="90" cy="90" r="${radius}" />
@@ -880,10 +959,10 @@ class PsTimerTray extends HTMLElement {
               </div>
             </div>
 
-            ${timer.animation !== "none" ? `<div class="card-animation${timer.animation === "toothbrush-guided" ? " teeth-variant" : ""}" id="card-animation">${this._getAnimationHtml(timer.animation)}</div>` : ""}
+            ${timer.animation !== "none" ? `<div class="card-animation${timer.animation === "toothbrush-guided" ? " teeth-variant" : ""}" id="card-animation">${this._getAnimationHtml(timer)}</div>` : ""}
 
-            ${this._getScript(timer.animation) ? (() => {
-              const script = this._getScript(timer.animation);
+            ${this._getScript(timer) ? (() => {
+              const script = this._getScript(timer);
               const stage = script.stages[timer._stageIndex];
               return `
                 <div class="stage-label" id="card-stage-label">${stage?.label || ""}</div>
@@ -891,13 +970,31 @@ class PsTimerTray extends HTMLElement {
                   ${script.stages.map((s, i) =>
                     `<div class="stage-dot${i < timer._stageIndex ? " done" : ""}${i === timer._stageIndex ? " current" : ""}" title="${s.label}"></div>`
                   ).join("")}
+                  ${(timer.extras || []).map((x) =>
+                    `<div class="stage-dot extra-dot" data-extra="${x}" title="Bonus round: ${tracker.BRUSH_EXTRAS[x]}"></div>`
+                  ).join("")}
                 </div>
+                ${timer.extras?.length ? `
+                  <div class="bonus-round" id="card-bonus-round" style="display:none">${this._bonusRoundHtml(timer)}</div>
+                ` : ""}
               `;
             })() : ""}
 
             <div id="card-status" class="card-status">${timer.timerMode === "over"
               ? `Spend at least ${this._formatTime(timer.targetSeconds)}`
               : `Finish before ${this._formatTime(timer.targetSeconds)}`}</div>
+
+            ${(() => {
+              const task = trackerStore.tasks.data.find((t) => t.id === timer.taskId);
+              // Criteria tied to a bonus round are claimed by finishing that round
+              const claimable = (task?.bonusCriteria || []).filter((bc) => bc.selfReport && !bc.extra);
+              if (claimable.length === 0) return "";
+              return `<div class="claim-criteria">${claimable.map((bc) => `
+                <label class="claim-criterion">
+                  <input type="checkbox" data-claim="${bc.id}" ${timer.claimed.has(bc.id) ? "checked" : ""} />
+                  ${bc.label} <span class="claim-mult">×${bc.multiplier}</span>
+                </label>`).join("")}</div>`;
+            })()}
 
             <div class="card-actions">
               <button class="timer-btn btn-cancel" id="card-cancel">Cancel</button>
@@ -967,6 +1064,37 @@ class PsTimerTray extends HTMLElement {
       });
     }
 
+    // Bonus rounds: pick any round to start it; "Did it!" claims its linked criterion
+    const roundEl = this.shadowRoot.getElementById("card-bonus-round");
+    if (roundEl) {
+      roundEl.addEventListener("click", (e) => {
+        const timer = this._timers.get(this._focusedKey);
+        const btn = e.target.closest("button");
+        if (!timer || !btn) return;
+        if (btn.dataset.roundPick) {
+          timer._activeExtra = btn.dataset.roundPick;
+        } else if (btn.dataset.roundAction === "done") {
+          timer._extrasDone.add(timer._activeExtra);
+          const linked = this._roundCriterion(timer, timer._activeExtra);
+          if (linked) timer.claimed.add(linked.id);
+          window.slopSFX?.stageChime?.(timer._extrasDone.size);
+          timer._activeExtra = null;
+        } else if (btn.dataset.roundAction === "back") {
+          timer._activeExtra = null;
+        }
+        roundEl.innerHTML = this._bonusRoundHtml(timer);
+      });
+    }
+
+    this.shadowRoot.querySelectorAll("[data-claim]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const timer = this._timers.get(this._focusedKey);
+        if (!timer) return;
+        if (cb.checked) timer.claimed.add(cb.dataset.claim);
+        else timer.claimed.delete(cb.dataset.claim);
+      });
+    });
+
     const pauseBtn = this.shadowRoot.getElementById("card-pause-btn");
     if (pauseBtn) {
       pauseBtn.addEventListener("click", () => {
@@ -983,79 +1111,130 @@ class PsTimerTray extends HTMLElement {
     }
   }
 
-  _getTeethDiagramHtml() {
-    // Zone positions: [x, y, width, height] for each tooth
-    // Upper arch: zone 0 (upper-left), zone 1 (upper-front), zone 2 (upper-right)
-    // Lower arch: zone 3 (lower-left), zone 4 (lower-front), zone 5 (lower-right)
-    const zones = [
-      // Zone 0: Upper left (3 teeth, molars to premolars)
-      { teeth: [{x:32,y:32,w:10,h:16,rx:3},{x:44,y:30,w:10,h:18,rx:3},{x:56,y:28,w:10,h:20,rx:3}] },
-      // Zone 1: Upper front (4 teeth, incisors/canines)
-      { teeth: [{x:68,y:24,w:9,h:26,rx:3},{x:79,y:22,w:10,h:28,rx:3},{x:91,y:22,w:10,h:28,rx:3},{x:103,y:24,w:9,h:26,rx:3}] },
-      // Zone 2: Upper right (3 teeth)
-      { teeth: [{x:114,y:28,w:10,h:20,rx:3},{x:126,y:30,w:10,h:18,rx:3},{x:138,y:32,w:10,h:16,rx:3}] },
-      // Zone 3: Lower left (3 teeth)
-      { teeth: [{x:32,y:72,w:10,h:16,rx:3},{x:44,y:70,w:10,h:18,rx:3},{x:56,y:68,w:10,h:20,rx:3}] },
-      // Zone 4: Lower front (4 teeth)
-      { teeth: [{x:68,y:66,w:9,h:26,rx:3},{x:79,y:64,w:10,h:28,rx:3},{x:91,y:64,w:10,h:28,rx:3},{x:103,y:66,w:9,h:26,rx:3}] },
-      // Zone 5: Lower right (3 teeth)
-      { teeth: [{x:114,y:68,w:10,h:20,rx:3},{x:126,y:70,w:10,h:18,rx:3},{x:138,y:72,w:10,h:16,rx:3}] },
-    ];
+  // Tooth rects per zone. Upper arch: upper-left, upper-front, upper-right;
+  // lower arch: lower-left, lower-front, lower-right.
+  static TEETH_ZONES = {
+    // Molars to premolars
+    "upper-left":  [{x:32,y:36,w:10,h:16,rx:3},{x:44,y:34,w:10,h:18,rx:3},{x:56,y:32,w:10,h:20,rx:3}],
+    // Incisors/canines
+    "upper-front": [{x:68,y:28,w:9,h:26,rx:3},{x:79,y:26,w:10,h:28,rx:3},{x:91,y:26,w:10,h:28,rx:3},{x:103,y:28,w:9,h:26,rx:3}],
+    "upper-right": [{x:114,y:32,w:10,h:20,rx:3},{x:126,y:34,w:10,h:18,rx:3},{x:138,y:36,w:10,h:16,rx:3}],
+    "lower-left":  [{x:32,y:66,w:10,h:16,rx:3},{x:44,y:64,w:10,h:18,rx:3},{x:56,y:62,w:10,h:20,rx:3}],
+    "lower-front": [{x:68,y:60,w:9,h:26,rx:3},{x:79,y:58,w:10,h:28,rx:3},{x:91,y:58,w:10,h:28,rx:3},{x:103,y:60,w:9,h:26,rx:3}],
+    "lower-right": [{x:114,y:62,w:10,h:20,rx:3},{x:126,y:64,w:10,h:18,rx:3},{x:138,y:66,w:10,h:16,rx:3}],
+  };
 
+  // Tongue at rest, mostly behind the lower front teeth; drawn only when the
+  // pattern has a tongue round
+  static TONGUE = { cx: 90, cy: 61.5, rx: 22, ry: 4 };
+
+  // Floss positions [x, y]: each gap between adjacent teeth, upper arch then lower
+  static FLOSS_GAPS = (() => {
+    const z = PsTimerTray.TEETH_ZONES;
+    const gaps = [];
+    for (const arch of [["upper-left", "upper-front", "upper-right"], ["lower-left", "lower-front", "lower-right"]]) {
+      const teeth = arch.flatMap((k) => z[k]).sort((a, b) => a.x - b.x);
+      for (let i = 0; i < teeth.length - 1; i++) {
+        const a = teeth[i], b = teeth[i + 1];
+        gaps.push([(a.x + a.w + b.x) / 2, (a.y + a.h / 2 + b.y + b.h / 2) / 2]);
+      }
+    }
+    return gaps;
+  })();
+
+  _getTeethDiagramHtml(extras) {
+    const usedZones = new Set(extras);
     let teethSvg = "";
 
     // Seeded random for consistent grime placement
     const seeded = (s) => () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; };
-
-    // Tooth zone groups
-    for (let z = 0; z < zones.length; z++) {
-      const rng = seeded(z * 1000 + 7);
-      teethSvg += `<g class="tooth-zone" data-stage="${z}">`;
-      for (const t of zones[z].teeth) {
-        teethSvg += `<rect class="tooth" x="${t.x}" y="${t.y}" width="${t.w}" height="${t.h}" rx="${t.rx}" />`;
-        // Grime splotches on each tooth (jagged irregular shapes)
-        for (let g = 0; g < 5; g++) {
-          const cx = t.x + 2 + rng() * (t.w - 4);
-          const cy = t.y + 3 + rng() * (t.h - 6);
-          const sz = 1.5 + rng() * 2.5;
-          const colors = ["rgba(90,100,30,0.7)", "rgba(50,160,50,0.5)", "rgba(30,30,30,0.6)", "rgba(140,130,40,0.65)", "rgba(70,130,50,0.55)", "rgba(20,20,15,0.5)", "rgba(160,150,60,0.6)", "rgba(40,80,30,0.6)"];
-          // Jagged polygon with 5-6 irregular points
-          const pts = [];
-          const numPts = 5 + Math.floor(rng() * 2);
-          for (let p = 0; p < numPts; p++) {
-            const a = (p / numPts) * Math.PI * 2;
-            const r = sz * (0.5 + rng() * 0.7);
-            pts.push(`${(cx + Math.cos(a) * r).toFixed(1)},${(cy + Math.sin(a) * r).toFixed(1)}`);
-          }
-          teethSvg += `<polygon class="grime" points="${pts.join(" ")}" fill="${colors[g % colors.length]}" />`;
-        }
+    const grimeColors = ["rgba(90,100,30,0.7)", "rgba(50,160,50,0.5)", "rgba(30,30,30,0.6)", "rgba(140,130,40,0.65)", "rgba(70,130,50,0.55)", "rgba(20,20,15,0.5)", "rgba(160,150,60,0.6)", "rgba(40,80,30,0.6)"];
+    // Jagged polygon with 5-6 irregular points
+    const splotch = (rng, cx, cy, sz, fill) => {
+      const pts = [];
+      const numPts = 5 + Math.floor(rng() * 2);
+      for (let p = 0; p < numPts; p++) {
+        const a = (p / numPts) * Math.PI * 2;
+        const r = sz * (0.5 + rng() * 0.7);
+        pts.push(`${(cx + Math.cos(a) * r).toFixed(1)},${(cy + Math.sin(a) * r).toFixed(1)}`);
       }
-      teethSvg += `</g>`;
-    }
+      return `<polygon class="grime" points="${pts.join(" ")}" fill="${fill}" />`;
+    };
 
-    // Gum arcs (drawn on top of teeth — at the roots)
-    teethSvg += `<path class="gum-line" d="M24 30 Q90 18 156 30" />`;
-    teethSvg += `<path class="gum-line" d="M24 90 Q90 98 156 90" />`;
-
-    // Bubble layer (drawn on top of gums, grouped by zone for class toggling)
-    for (let z = 0; z < zones.length; z++) {
-      const zoneTeeth = zones[z].teeth;
-      const zMinX = Math.min(...zoneTeeth.map(t => t.x));
-      const zMaxX = Math.max(...zoneTeeth.map(t => t.x + t.w));
-      const zMinY = Math.min(...zoneTeeth.map(t => t.y));
-      const zMaxY = Math.max(...zoneTeeth.map(t => t.y + t.h));
+    // Bubbles around a zone's bounding box (grouped by zone for class toggling)
+    const bubbles = (key, box, z) => {
       const padX = 12, padY = 10;
       const bRng = seeded(z * 2000 + 13);
-      teethSvg += `<g class="tooth-zone" data-stage="${z}">`;
+      let svg = `<g class="tooth-zone" data-zone="${key}">`;
       for (let b = 0; b < 10; b++) {
-        const bx = (zMinX - padX) + bRng() * (zMaxX - zMinX + padX * 2);
-        const by = (zMinY - padY) + bRng() * (zMaxY - zMinY + padY * 2);
+        const bx = (box.minX - padX) + bRng() * (box.maxX - box.minX + padX * 2);
+        const by = (box.minY - padY) + bRng() * (box.maxY - box.minY + padY * 2);
         const br = 1.5 + bRng() * 3;
         const delay = (bRng() * 2.5).toFixed(2);
         const dur = (1.2 + bRng() * 1.2).toFixed(2);
-        teethSvg += `<circle class="bubble" cx="${bx.toFixed(1)}" cy="${by.toFixed(1)}" r="${br.toFixed(1)}" style="animation-delay:${delay}s;animation-duration:${dur}s" />`;
+        svg += `<circle class="bubble" cx="${bx.toFixed(1)}" cy="${by.toFixed(1)}" r="${br.toFixed(1)}" style="animation-delay:${delay}s;animation-duration:${dur}s" />`;
+      }
+      return svg + `</g>`;
+    };
+
+    // Tooth zones (teeth + bubbles), built per zone and grouped by arch below
+    const zoneSvg = {};
+    const bubbleSvg = {};
+    Object.entries(PsTimerTray.TEETH_ZONES).forEach(([key, teeth], z) => {
+      const rng = seeded(z * 1000 + 7);
+      let svg = `<g class="tooth-zone" data-zone="${key}">`;
+      for (const t of teeth) {
+        svg += `<rect class="tooth" x="${t.x}" y="${t.y}" width="${t.w}" height="${t.h}" rx="${t.rx}" />`;
+        for (let g = 0; g < 5; g++) {
+          svg += splotch(rng, t.x + 2 + rng() * (t.w - 4), t.y + 3 + rng() * (t.h - 6), 1.5 + rng() * 2.5, grimeColors[g % grimeColors.length]);
+        }
+      }
+      zoneSvg[key] = svg + `</g>`;
+      bubbleSvg[key] = bubbles(key, {
+        minX: Math.min(...teeth.map((t) => t.x)), maxX: Math.max(...teeth.map((t) => t.x + t.w)),
+        minY: Math.min(...teeth.map((t) => t.y)), maxY: Math.max(...teeth.map((t) => t.y + t.h)),
+      }, z);
+    });
+
+    // Mouth interior between the arches; grows when the mouth opens
+    teethSvg += `<ellipse class="mouth-inside" cx="90" cy="58" rx="60" ry="14" />`;
+
+    // Resting tongue: behind the lower front teeth with just its top showing
+    const tg = PsTimerTray.TONGUE;
+    if (usedZones.has("tongue")) {
+      teethSvg += `<ellipse class="tongue tongue-rest" cx="${tg.cx}" cy="${tg.cy}" rx="${tg.rx}" ry="${tg.ry}" />`;
+    }
+
+    // Arches: teeth, gum arc at the roots, then bubbles on top
+    const arch = (cls, keys, gum) =>
+      `<g class="arch ${cls}">${keys.map((k) => zoneSvg[k]).join("")}<path class="gum-line" d="${gum}" />${keys.map((k) => bubbleSvg[k]).join("")}</g>`;
+    teethSvg += arch("arch-upper", ["upper-left", "upper-front", "upper-right"], "M24 34 Q90 22 156 34");
+    teethSvg += arch("arch-lower", ["lower-left", "lower-front", "lower-right"], "M24 84 Q90 92 156 84");
+
+    // Stuck-out tongue for the tongue round: drawn over the lower teeth, folded
+    // up out of sight until the mouth opens (.mouth-open), with a whitish
+    // coating that brushes off
+    if (usedZones.has("tongue")) {
+      const rng = seeded(777);
+      teethSvg += `<g class="tooth-zone tongue-out" data-zone="tongue">`;
+      teethSvg += `<path class="tongue" d="M64 58 C64 82 75 102 90 102 C105 102 116 82 116 58 Z" />`;
+      teethSvg += `<path class="tongue-groove" d="M90 62 L90 92" />`;
+      for (let g = 0; g < 14; g++) {
+        teethSvg += splotch(rng, 74 + rng() * 32, 62 + rng() * 30, 1.4 + rng() * 1.4, "rgba(235,235,215,0.7)");
       }
       teethSvg += `</g>`;
+      teethSvg += bubbles("tongue", { minX: 66, maxX: 114, minY: 62, maxY: 100 }, 6);
+    }
+
+    // Floss pick: thread at local x=0, frame + handle off to the left
+    if (usedZones.has("floss")) {
+      teethSvg += `<g class="teeth-floss" id="teeth-floss" style="opacity:0">
+        <g class="floss-saw">
+          <path d="M0 -12 L-7 -12 L-7 12 L0 12" stroke="#ff79c6" stroke-width="2.5" stroke-linejoin="round" fill="none"/>
+          <rect x="-34" y="-2.5" width="27" height="5" rx="2.5" fill="#ff79c6"/>
+          <line x1="0" y1="-12" x2="0" y2="12" stroke="#f8f8f2" stroke-width="1.2"/>
+        </g>
+      </g>`;
     }
 
     // Toothbrush overlay (inner scrub group moves the whole brush)
@@ -1075,22 +1254,23 @@ class PsTimerTray extends HTMLElement {
 
   // Brush position per zone: [x, y, scaleX]
   // Head is 28 wide (center at local x=14). scaleX=-1 mirrors, so offset accordingly.
-  static BRUSH_POSITIONS = [
-    [63, 38, -1],   // upper-left: teeth center ~49, +14 for mirrored head
-    [76, 36, 1],    // upper-front: teeth center ~90, -14 for head center
-    [117, 38, 1],   // upper-right: teeth center ~131, -14
-    [63, 78, -1],   // lower-left
-    [76, 80, 1],    // lower-front
-    [117, 78, 1],   // lower-right
-  ];
+  static BRUSH_POSITIONS = {
+    "upper-left": [63, 42, -1],   // teeth center ~49, +14 for mirrored head
+    "upper-front": [76, 40, 1],   // teeth center ~90, -14 for head center
+    "upper-right": [117, 42, 1],  // teeth center ~131, -14
+    "lower-left": [63, 72, -1],
+    "lower-front": [76, 74, 1],
+    "lower-right": [117, 72, 1],
+    "tongue": [76, 84, 1],     // middle of the stuck-out tongue
+  };
 
-  _getAnimationHtml(key) {
+  _getAnimationHtml(timer) {
     // Teeth diagram for toothbrush-guided
-    if (key === "toothbrush-guided") return this._getTeethDiagramHtml();
+    if (timer.animation === "toothbrush-guided" && timer.script) return this._getTeethDiagramHtml(timer.extras);
 
     // Other guided animations use the base animation's SVG
-    const script = ANIMATION_SCRIPTS[key];
-    if (script) key = script.baseAnimation;
+    let key = timer.animation;
+    if (timer.script) key = timer.script.baseAnimation;
 
     switch (key) {
       case "toothbrush":
@@ -1490,6 +1670,35 @@ class PsTimerTray extends HTMLElement {
         border: 1px solid rgba(255, 255, 255, 0.06);
       }
 
+      .claim-criteria {
+        position: relative;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px 14px;
+        margin: 0 0 12px;
+      }
+
+      .claim-criterion {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.85rem;
+        color: var(--text);
+        cursor: pointer;
+      }
+
+      .claim-criterion input {
+        accent-color: #50fa7b;
+        width: 18px;
+        height: 18px;
+      }
+
+      .claim-mult {
+        font-size: 0.72rem;
+        color: #50fa7b;
+      }
+
       .bonus-hint {
         position: relative;
         font-size: 0.72rem;
@@ -1597,6 +1806,72 @@ class PsTimerTray extends HTMLElement {
         border-color: #50fa7b;
       }
 
+      .stage-dot.extra-dot {
+        border-radius: 2px;
+        transform: rotate(45deg) scale(0.9);
+      }
+
+      .stage-dot.extra-dot.current {
+        transform: rotate(45deg) scale(1.2);
+      }
+
+
+      .bonus-round {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        margin: 0 0 12px;
+        animation: stageLabelIn 0.3s ease-out;
+      }
+
+      .bonus-round-reward {
+        font-size: 0.78rem;
+        color: #50fa7b;
+      }
+
+      .bonus-round-reward:empty { display: none; }
+
+      .bonus-round-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+      }
+
+      .btn-round-pick {
+        background: rgba(241, 250, 140, 0.08);
+        color: #f1fa8c;
+        border: 1px solid rgba(241, 250, 140, 0.3);
+      }
+
+      .btn-round-pick .round-mult {
+        font-size: 0.72rem;
+        color: #50fa7b;
+      }
+
+      .btn-round-pick.done:disabled {
+        opacity: 1;
+        background: rgba(80, 250, 123, 0.08);
+        color: #50fa7b;
+        border-color: rgba(80, 250, 123, 0.3);
+        cursor: default;
+      }
+
+      .btn-round-back {
+        background: rgba(255, 255, 255, 0.04);
+        color: #a0a4be;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .btn-round-done {
+        background: rgba(241, 250, 140, 0.12);
+        color: #f1fa8c;
+        border: 1px solid rgba(241, 250, 140, 0.4);
+        box-shadow: 0 0 12px rgba(241, 250, 140, 0.15);
+      }
+
       /* --- Task animations --- */
       .card-animation {
         position: relative;
@@ -1702,7 +1977,7 @@ class PsTimerTray extends HTMLElement {
       }
 
       .tooth {
-        fill: rgba(230, 240, 180, 0.7);
+        fill: rgb(168, 175, 136);
         transition: fill 0.4s ease, filter 0.4s ease;
       }
 
@@ -1744,7 +2019,7 @@ class PsTimerTray extends HTMLElement {
       }
 
       .zone-active .tooth {
-        fill: rgba(220, 240, 255, 0.75);
+        fill: rgb(170, 186, 200);
         filter: drop-shadow(0 0 8px rgba(180, 220, 255, 0.5));
         animation: foamy 0.6s ease-in-out infinite alternate;
       }
@@ -1755,7 +2030,7 @@ class PsTimerTray extends HTMLElement {
       }
 
       .zone-done .tooth {
-        fill: rgba(255, 255, 255, 0.92);
+        fill: rgb(236, 236, 237);
         filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.3));
       }
 
@@ -1767,14 +2042,99 @@ class PsTimerTray extends HTMLElement {
         animation: scrubV 0.4s ease-in-out infinite;
       }
 
-      .teeth-brush.scrub-h .tb-scrub {
+      .teeth-brush[data-motion="back-and-forth"] .tb-scrub {
         animation-name: scrubH;
+      }
+
+      .teeth-brush[data-motion="circles"] .tb-scrub {
+        animation: scrubCircle 0.6s linear infinite;
+      }
+
+      .teeth-brush[data-motion="sweep"] .tb-scrub {
+        animation: scrubSweep 0.9s ease-in-out infinite;
+      }
+
+      .mouth-inside {
+        fill: rgb(70, 18, 32);
+      }
+
+      .arch,
+      .mouth-inside {
+        transform-box: fill-box;
+        transform-origin: center;
+        transition: transform 0.5s cubic-bezier(0.34, 1.4, 0.64, 1);
+      }
+
+      .mouth-open .arch-upper { transform: translateY(-11px); }
+      .mouth-open .arch-lower { transform: translateY(15px); }
+      .mouth-open .mouth-inside { transform: scaleY(1.6); }
+
+      /* Tongue unrolls down from the gap when the mouth opens */
+      .tongue-out {
+        transform-box: fill-box;
+        transform-origin: 50% 0;
+        transform: scaleY(0);
+        opacity: 0;
+        transition: transform 0.45s cubic-bezier(0.34, 1.4, 0.64, 1) 0.15s, opacity 0.2s ease 0.15s;
+      }
+      .mouth-open .tongue-out {
+        transform: scaleY(1);
+        opacity: 1;
+      }
+      .tongue-rest { transition: opacity 0.3s ease; }
+      .mouth-open .tongue-rest { opacity: 0; }
+
+      .tongue-groove {
+        stroke: rgb(190, 85, 105);
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        fill: none;
+      }
+
+      .tongue {
+        fill: rgb(225, 115, 135);
+        transition: fill 0.4s ease, filter 0.4s ease;
+      }
+
+      .zone-active .tongue {
+        filter: drop-shadow(0 0 6px rgba(255, 180, 200, 0.5));
+      }
+
+      .zone-done .tongue {
+        fill: rgb(240, 135, 155);
+      }
+
+      .teeth-floss {
+        transition: transform 0.3s ease, opacity 0.5s ease;
+      }
+
+      .teeth-floss .floss-saw {
+        animation: flossSaw 0.35s ease-in-out infinite;
       }
 
       @keyframes scrubV {
         0%, 100% { transform: translate(0, 0); }
         25%  { transform: translateY(-3px); }
         75%  { transform: translateY(3px); }
+      }
+      @keyframes scrubCircle {
+        0%    { transform: translate(5px, 0); }
+        12.5% { transform: translate(3.5px, 2.1px); }
+        25%   { transform: translate(0, 3px); }
+        37.5% { transform: translate(-3.5px, 2.1px); }
+        50%   { transform: translate(-5px, 0); }
+        62.5% { transform: translate(-3.5px, -2.1px); }
+        75%   { transform: translate(0, -3px); }
+        87.5% { transform: translate(3.5px, -2.1px); }
+        100%  { transform: translate(5px, 0); }
+      }
+      @keyframes scrubSweep {
+        0%, 100% { transform: translateX(10px); }
+        60%      { transform: translateX(-10px); }
+      }
+      @keyframes flossSaw {
+        0%, 100% { transform: translateY(-2px); }
+        50%      { transform: translateY(2px); }
       }
       @keyframes scrubH {
         0%, 100% { transform: translate(0, 0); }

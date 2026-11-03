@@ -501,10 +501,12 @@ class PsCalendarView extends HTMLElement {
           (byUser[userId] ||= []).push(taskId);
         }
 
+        let added = 0;
+        const skipped = [];
         for (const [userId, taskIds] of Object.entries(byUser)) {
           for (const taskId of taskIds) {
             try {
-              await tracker.apiFetch("/api/completions/backfill", {
+              const res = await tracker.apiFetch("/api/completions/backfill", {
                 method: "POST",
                 body: JSON.stringify({
                   taskId,
@@ -513,6 +515,8 @@ class PsCalendarView extends HTMLElement {
                   note: "backfill",
                 }),
               });
+              added += res?.inserted || 0;
+              if (res?.skipped) skipped.push(trackerStore.tasks.data.find(t => t.id === taskId)?.name || taskId);
             } catch (e) {
               this._backfillStatus = `<span class="error">Error: ${e.message}</span>`;
               this.render();
@@ -521,7 +525,8 @@ class PsCalendarView extends HTMLElement {
           }
         }
 
-        this._backfillStatus = `Added ${checked.length} completion${checked.length > 1 ? "s" : ""}`;
+        this._backfillStatus = `Added ${added} completion${added !== 1 ? "s" : ""}`;
+        if (skipped.length) this._backfillStatus += ` <span class="error">(skipped, already done that day: ${skipped.join(", ")})</span>`;
         await tracker.refreshState();
         this.render();
       });

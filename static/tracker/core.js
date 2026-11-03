@@ -458,9 +458,65 @@ function calcStreak(taskId, userId) {
 
 // --- Task completion logic ---------------------------------------------------
 
-async function completeTask(taskId, userId, timerSeconds = null) {
+// --- Toothbrushing patterns -------------------------------------------------
+// Drive the "toothbrush-guided" timer animation. A pattern is either a preset
+// key or a custom { steps: [{ zone, motion, weight }], extras: [...] }. Steps
+// split the timer target by weight; extras (floss, tongue) are untimed bonus
+// rounds the user can opt into once the target is reached.
+
+const BRUSH_ZONES = {
+  "upper-left": "Upper left",
+  "upper-front": "Upper front",
+  "upper-right": "Upper right",
+  "lower-left": "Lower left",
+  "lower-front": "Lower front",
+  "lower-right": "Lower right",
+};
+
+const BRUSH_MOTIONS = {
+  "alternate": "Up-down + back-forth",
+  "back-and-forth": "Back and forth",
+  "up-and-down": "Up and down",
+  "circles": "Circles",
+};
+
+// Bonus rounds (opt-in, any order, once the target is reached)
+const BRUSH_EXTRAS = {
+  "floss": "Floss",
+  "tongue": "Brush tongue",
+};
+
+const _SIX_ZONES = Object.keys(BRUSH_ZONES);
+const _CIRCLES = _SIX_ZONES.map((zone) => ({ zone, motion: "circles" }));
+
+const BRUSH_PRESETS = {
+  "classic": { label: "6 zones: up-down + back-forth", steps: _SIX_ZONES.map((zone) => ({ zone, motion: "alternate" })) },
+  "circles": { label: "6 zones: circles", steps: _CIRCLES },
+  "circles-tongue": { label: "Circles, then tongue", steps: _CIRCLES, extras: ["tongue"] },
+  "circles-floss-tongue": { label: "Circles, then floss + tongue", steps: _CIRCLES, extras: ["floss", "tongue"] },
+};
+
+// Resolve a pattern to validated { steps, extras }, each step with a display
+// label. Unknown or empty patterns fall back to "classic".
+function resolveBrushPattern(pattern) {
+  const p = typeof pattern === "string" ? BRUSH_PRESETS[pattern] : pattern;
+  let steps = (p?.steps || []).filter((st) => BRUSH_ZONES[st.zone]);
+  if (steps.length === 0) steps = BRUSH_PRESETS.classic.steps;
+  steps = steps.map((st) => {
+    const motion = BRUSH_MOTIONS[st.motion] ? st.motion : "alternate";
+    // Name the motion unless it's the classic default
+    const label = motion !== "alternate" ? `${BRUSH_ZONES[st.zone]} · ${BRUSH_MOTIONS[motion].toLowerCase()}` : BRUSH_ZONES[st.zone];
+    return { zone: st.zone, motion, weight: st.weight > 0 ? st.weight : 1, label };
+  });
+  const extras = Object.keys(BRUSH_EXTRAS).filter((x) => (p?.extras || []).includes(x));
+  return { steps, extras };
+}
+
+// criteria: ids of self-report bonus criteria the user is claiming
+async function completeTask(taskId, userId, timerSeconds = null, criteria = []) {
   const clientId = uid();
   const body = { taskId, userId, timerSeconds, _clientId: clientId };
+  if (criteria.length > 0) body.criteria = criteria;
 
   try {
     const result = await apiFetch("/api/completions", {
@@ -2085,6 +2141,11 @@ window.tracker = {
   adjustBalance,
   setBalance,
   calcStreak,
+  BRUSH_ZONES,
+  BRUSH_MOTIONS,
+  BRUSH_EXTRAS,
+  BRUSH_PRESETS,
+  resolveBrushPattern,
   completeTask,
   approveCompletion,
   rejectCompletion,

@@ -208,6 +208,9 @@ class PsAdminTasks extends HTMLElement {
     const timerHitSound = task?.timerBonus?.hitSound || "success";
     const timerAnimation = task?.timerBonus?.animation || "none";
     const timerAnimationOverrides = task?.timerBonus?.animationOverrides || {};
+    const brushPattern = task?.timerBonus?.brushPattern || "classic";
+    const brushPatternOverrides = task?.timerBonus?.brushPatternOverrides || {};
+    const usesGuidedBrush = timerAnimation === "toothbrush-guided" || Object.values(timerAnimationOverrides).includes("toothbrush-guided");
     const bonusCriteria = task?.bonusCriteria || [];
     const activeDays = task?.activeDays || [];
     const deadline = task?.deadline || "";
@@ -306,12 +309,14 @@ class PsAdminTasks extends HTMLElement {
         }
         .bonus-criterion-row {
           display: flex;
+          flex-wrap: wrap;
           gap: 8px;
           align-items: center;
           margin-bottom: 6px;
         }
         .bonus-criterion-row input[type="text"] {
-          flex: 1;
+          flex: 1 1 100px;
+          min-width: 0;
           background: #0d0e16;
           border: 1px solid var(--border-subtle);
           border-radius: var(--radius-sm);
@@ -321,7 +326,7 @@ class PsAdminTasks extends HTMLElement {
           font-family: inherit;
         }
         .bonus-criterion-row input[type="number"] {
-          width: 80px;
+          width: 64px;
           background: #0d0e16;
           border: 1px solid var(--border-subtle);
           border-radius: var(--radius-sm);
@@ -343,6 +348,61 @@ class PsAdminTasks extends HTMLElement {
         .bonus-criterion-row .remove-criterion:hover {
           background: rgba(255, 107, 129, 0.15);
         }
+        .bonus-criterion-row .criterion-self {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 0.72rem;
+          color: var(--muted);
+          white-space: nowrap;
+          cursor: pointer;
+        }
+        .bonus-criterion-row .criterion-self input { accent-color: var(--accent); }
+        .brush-steps {
+          margin: 0 0 10px 4px;
+          padding-left: 8px;
+          border-left: 2px solid var(--border-subtle);
+        }
+        .brush-step-row {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+          margin-bottom: 6px;
+        }
+        .brush-step-row select { flex: 1; min-width: 0; font-size: 0.8rem; }
+        .brush-step-row input[type="number"] {
+          width: 56px;
+          background: #0d0e16;
+          border: 1px solid var(--border-subtle);
+          border-radius: var(--radius-sm);
+          padding: 6px 8px;
+          font-size: 0.84rem;
+          color: var(--text);
+          font-family: inherit;
+        }
+        .brush-step-row .remove-step {
+          appearance: none;
+          border: none;
+          background: transparent;
+          color: var(--danger);
+          cursor: pointer;
+          font-size: 1.1rem;
+          padding: 2px 6px;
+          border-radius: 4px;
+        }
+        .brush-hint { font-size: 0.72rem; color: var(--muted); margin: -2px 0 10px; }
+        .brush-extras {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 6px 14px;
+          margin-top: 8px;
+          font-size: 0.78rem;
+          color: var(--muted);
+        }
+        .brush-extras label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+        .brush-extras input { accent-color: var(--accent); }
+        .bonus-criterion-row .criterion-round { font-size: 0.78rem; }
       </style>
       <div class="panel">
         <h3>${isNew ? (isPenalty ? "New Penalty" : "New Task") : "Edit " + (isPenalty ? "Penalty" : "Task")}</h3>
@@ -532,6 +592,12 @@ class PsAdminTasks extends HTMLElement {
               </div>
             `; }).join("")}
           </div>
+          <div id="brush-pattern-section" style="${usesGuidedBrush ? "" : "display:none"}">
+            <div class="section-label">Brushing pattern (guided toothbrush)</div>
+            <div class="brush-hint">Steps split the timer target by weight. Bonus rounds (floss, tongue) come after the target is reached; tie a "Kid claims" bonus criterion to a round to pay for it.</div>
+            ${this._brushPatternRowHtml("", "Default", brushPattern)}
+            ${users.filter(u => u.role !== "parent").map((u) => this._brushPatternRowHtml(u.id, u.name, brushPatternOverrides[u.id])).join("")}
+          </div>
 
           <div class="section-label">Bonus Criteria (optional)</div>
           <div id="bonus-criteria-list">
@@ -540,6 +606,8 @@ class PsAdminTasks extends HTMLElement {
                 <input type="text" class="criterion-label" value="${bc.label}" placeholder="e.g. Without reminding" />
                 <input type="number" class="criterion-multiplier" value="${bc.multiplier}" placeholder="1.25" step="0.05" min="1" />
                 <span style="font-size:0.72rem;color:var(--muted)">×</span>
+                <label class="criterion-self" title="Kid can claim this when finishing a timer, without parent approval"><input type="checkbox" class="criterion-self-report" ${bc.selfReport ? "checked" : ""} />Kid claims</label>
+                ${this._criterionRoundHtml(bc)}
                 <button class="remove-criterion" type="button">×</button>
               </div>
             `).join("")}
@@ -658,6 +726,40 @@ class PsAdminTasks extends HTMLElement {
       });
     }
 
+    // Brushing pattern: show when any user ends up on the guided toothbrush
+    const brushSection = this.shadowRoot.getElementById("brush-pattern-section");
+    const updateBrushSection = () => {
+      if (!brushSection) return;
+      const anims = [animEl?.value, ...[...this.shadowRoot.querySelectorAll("[data-anim-override]")].map((sel) => sel.value)];
+      brushSection.style.display = anims.includes("toothbrush-guided") ? "" : "none";
+    };
+    animEl?.addEventListener("change", updateBrushSection);
+    this.shadowRoot.querySelectorAll("[data-anim-override]").forEach((sel) => sel.addEventListener("change", updateBrushSection));
+
+    this.shadowRoot.querySelectorAll("[data-brush-pattern]").forEach((sel) => {
+      const key = sel.dataset.brushPattern;
+      const editor = this.shadowRoot.querySelector(`[data-brush-steps="${key}"]`);
+      let lastPreset = sel.value;
+      sel.addEventListener("change", () => {
+        editor.style.display = sel.value === "custom" ? "" : "none";
+        // Start a new custom pattern from whichever pattern was selected (a
+        // user on "Default" starts from the task's default pattern)
+        if (sel.value === "custom" && editor.querySelectorAll(".brush-step-row").length === 0) {
+          const base = lastPreset || this._readBrushPattern("");
+          const pattern = typeof base === "object" ? base : (tracker.BRUSH_PRESETS[base] || tracker.BRUSH_PRESETS.classic);
+          editor.querySelector(".brush-step-list").innerHTML = pattern.steps.map((st) => this._brushStepRowHtml(st)).join("");
+          editor.querySelectorAll(".brush-extra").forEach((cb) => { cb.checked = !!pattern.extras?.includes(cb.value); });
+        }
+        if (sel.value !== "custom") lastPreset = sel.value;
+      });
+      editor.querySelector(".add-brush-step").addEventListener("click", () => {
+        editor.querySelector(".brush-step-list").insertAdjacentHTML("beforeend", this._brushStepRowHtml({ zone: "upper-left", motion: "circles" }));
+      });
+      editor.addEventListener("click", (e) => {
+        if (e.target.classList.contains("remove-step")) e.target.closest(".brush-step-row").remove();
+      });
+    });
+
     // Bonus criteria: add / remove
     const criteriaList = this.shadowRoot.getElementById("bonus-criteria-list");
     const addCriterionBtn = this.shadowRoot.getElementById("add-criterion");
@@ -669,6 +771,8 @@ class PsAdminTasks extends HTMLElement {
           <input type="text" class="criterion-label" value="" placeholder="e.g. Without reminding" />
           <input type="number" class="criterion-multiplier" value="1.25" placeholder="1.25" step="0.05" min="1" />
           <span style="font-size:0.72rem;color:var(--muted)">×</span>
+          <label class="criterion-self" title="Kid can claim this when finishing a timer, without parent approval"><input type="checkbox" class="criterion-self-report" />Kid claims</label>
+          ${this._criterionRoundHtml({})}
           <button class="remove-criterion" type="button">×</button>
         `;
         row.querySelector(".remove-criterion").addEventListener("click", () => row.remove());
@@ -676,10 +780,81 @@ class PsAdminTasks extends HTMLElement {
       });
     }
     if (criteriaList) {
+      // Round link only applies to criteria the kid claims
+      criteriaList.addEventListener("change", (e) => {
+        if (!e.target.classList.contains("criterion-self-report")) return;
+        const round = e.target.closest(".bonus-criterion-row").querySelector(".criterion-round");
+        if (round) round.style.display = e.target.checked ? "" : "none";
+      });
       criteriaList.querySelectorAll(".remove-criterion").forEach((btn) => {
         btn.addEventListener("click", () => btn.closest(".bonus-criterion-row").remove());
       });
     }
+  }
+
+  // Pattern select (+ custom step editor) for the default ("") or one user
+  _brushPatternRowHtml(key, name, value) {
+    const isCustom = value && typeof value === "object";
+    const selected = isCustom ? "custom" : (value || "");
+    return `
+      <div class="reward-row">
+        <span class="currency-name">${name}</span>
+        <select data-brush-pattern="${key}">
+          ${key ? `<option value="" ${selected === "" ? "selected" : ""}>Default</option>` : ""}
+          ${Object.entries(tracker.BRUSH_PRESETS).map(([k, p]) => `<option value="${k}" ${selected === k ? "selected" : ""}>${p.label}</option>`).join("")}
+          <option value="custom" ${selected === "custom" ? "selected" : ""}>Custom…</option>
+        </select>
+      </div>
+      <div class="brush-steps" data-brush-steps="${key}" style="${isCustom ? "" : "display:none"}">
+        <div class="brush-step-list">${isCustom ? value.steps.map((st) => this._brushStepRowHtml(st)).join("") : ""}</div>
+        <button class="btn btn-sm btn-ghost add-brush-step" type="button">+ Add step</button>
+        <div class="brush-extras">
+          <span>Bonus rounds:</span>
+          ${Object.entries(tracker.BRUSH_EXTRAS).map(([x, label]) => `
+            <label><input type="checkbox" class="brush-extra" value="${x}" ${isCustom && value.extras?.includes(x) ? "checked" : ""} />${label}</label>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  _brushStepRowHtml(step) {
+    return `
+      <div class="brush-step-row">
+        <select class="brush-step-zone">
+          ${Object.entries(tracker.BRUSH_ZONES).map(([k, label]) => `<option value="${k}" ${step.zone === k ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+        <select class="brush-step-motion">
+          ${Object.entries(tracker.BRUSH_MOTIONS).map(([k, label]) => `<option value="${k}" ${(step.motion || "alternate") === k ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+        <input type="number" class="brush-step-weight" value="${step.weight || 1}" min="0.25" step="0.25" title="Relative duration" />
+        <button class="remove-step" type="button">×</button>
+      </div>
+    `;
+  }
+
+  _readBrushPattern(key) {
+    const s = this.shadowRoot;
+    const sel = s.querySelector(`[data-brush-pattern="${key}"]`);
+    if (!sel || !sel.value) return undefined;
+    if (sel.value !== "custom") return sel.value;
+    const steps = [...s.querySelectorAll(`[data-brush-steps="${key}"] .brush-step-row`)].map((row) => {
+      const zone = row.querySelector(".brush-step-zone").value;
+      const weight = parseFloat(row.querySelector(".brush-step-weight").value);
+      return { zone, motion: row.querySelector(".brush-step-motion").value, weight: weight > 0 ? weight : 1 };
+    });
+    if (steps.length === 0) return undefined;
+    const extras = [...s.querySelectorAll(`[data-brush-steps="${key}"] .brush-extra:checked`)].map((cb) => cb.value);
+    return extras.length > 0 ? { steps, extras } : { steps };
+  }
+
+  _criterionRoundHtml(bc) {
+    return `
+      <select class="criterion-round" title="Claimed by finishing this toothbrush bonus round" style="${bc.selfReport ? "" : "display:none"}">
+        <option value="">Any time</option>
+        ${Object.entries(tracker.BRUSH_EXTRAS).map(([x, label]) => `<option value="${x}" ${bc.extra === x ? "selected" : ""}>${label} round</option>`).join("")}
+      </select>
+    `;
   }
 
   _saveForm(isPenalty) {
@@ -762,6 +937,16 @@ class PsAdminTasks extends HTMLElement {
           if (sel.value) animOverrides[sel.dataset.animOverride] = sel.value;
         });
         if (Object.keys(animOverrides).length > 0) data.timerBonus.animationOverrides = animOverrides;
+        const pattern = this._readBrushPattern("");
+        if (pattern) data.timerBonus.brushPattern = pattern;
+        const patternOverrides = {};
+        s.querySelectorAll("[data-brush-pattern]").forEach((sel) => {
+          const key = sel.dataset.brushPattern;
+          if (!key) return;
+          const p = this._readBrushPattern(key);
+          if (p) patternOverrides[key] = p;
+        });
+        if (Object.keys(patternOverrides).length > 0) data.timerBonus.brushPatternOverrides = patternOverrides;
       } else {
         data.timerBonus = null;
       }
@@ -772,7 +957,13 @@ class PsAdminTasks extends HTMLElement {
         const multiplier = parseFloat(row.querySelector(".criterion-multiplier").value);
         if (label && multiplier > 0) {
           const existingId = row.dataset.criterionId;
-          bonusCriteria.push({ id: existingId || tracker.uid(), label, multiplier });
+          const criterion = { id: existingId || tracker.uid(), label, multiplier };
+          if (row.querySelector(".criterion-self-report")?.checked) {
+            criterion.selfReport = true;
+            const round = row.querySelector(".criterion-round")?.value;
+            if (round) criterion.extra = round;
+          }
+          bonusCriteria.push(criterion);
         }
       });
       data.bonusCriteria = bonusCriteria.length > 0 ? bonusCriteria : null;

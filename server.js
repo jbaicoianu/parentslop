@@ -1819,7 +1819,13 @@ app.post("/api/completions", requireFamilyAuth, async (req, res) => {
     if (hit) timerMultiplier = timerBonus.multiplier || 1;
   }
 
-  const rewards = computeRewards(task, streakMultiplier, timerMultiplier);
+  // Bonus criteria the kid claimed themselves (only those marked selfReport)
+  const claimed = Array.isArray(req.body.criteria) ? req.body.criteria : [];
+  const selfCriteria = jsonOrDefault(task.bonus_criteria, []).filter((bc) => bc.selfReport && claimed.includes(bc.id));
+  const criteriaMultiplier = selfCriteria.reduce((m, bc) => m * (bc.multiplier || 1), 1);
+  const criteriaChecked = selfCriteria.length > 0 ? JSON.stringify(selfCriteria.map((bc) => bc.id)) : null;
+
+  const rewards = computeRewards(task, streakMultiplier, timerMultiplier * criteriaMultiplier);
   const status = task.requires_approval ? "pending" : "approved";
   const id = crypto.randomUUID();
   const completedAt = new Date().toISOString();
@@ -1828,11 +1834,12 @@ app.post("/api/completions", requireFamilyAuth, async (req, res) => {
     family_id: req.familyId, task_id: taskId, user_id: userId, status, completed_at: completedAt,
     rewards: JSON.stringify(rewards), timer_seconds: timerSeconds ?? null,
     streak_count: newStreak, streak_multiplier: streakMultiplier, timer_multiplier: timerMultiplier,
+    bonus_criteria_checked: criteriaChecked, bonus_criteria_multiplier: criteriaMultiplier !== 1 ? criteriaMultiplier : null,
     note: '', is_penalty: 0, is_hourly: 0, total_seconds: null, worklog: null, _client_id: _clientId || null,
   };
-  db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, rewards, timer_seconds, streak_count, streak_multiplier, timer_multiplier, note, is_penalty, is_hourly, total_seconds, worklog, _client_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, NULL, NULL, ?)`)
-    .run(id, req.familyId, taskId, userId, status, completedAt, JSON.stringify(rewards), timerSeconds ?? null, newStreak, streakMultiplier, timerMultiplier, _clientId || null);
+  db.prepare(`INSERT INTO completions (id, family_id, task_id, user_id, status, completed_at, rewards, timer_seconds, streak_count, streak_multiplier, timer_multiplier, bonus_criteria_checked, bonus_criteria_multiplier, note, is_penalty, is_hourly, total_seconds, worklog, _client_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, NULL, NULL, ?)`)
+    .run(id, req.familyId, taskId, userId, status, completedAt, JSON.stringify(rewards), timerSeconds ?? null, newStreak, streakMultiplier, timerMultiplier, criteriaChecked, criteriaMultiplier !== 1 ? criteriaMultiplier : null, _clientId || null);
   emitEvent(req.familyId, "completions", id, "insert", completionData);
 
   if (status === "approved") {
@@ -1891,6 +1898,8 @@ app.post("/api/completions/backfill", requireFamilyAuth, requireAdmin, async (re
   if (!task) return res.status(404).json({ error: "task not found" });
 
   const rewards = computeRewards(task, 1, 1); // no streak/timer bonuses for backfill
+  const tzOffset = parseInt(req.headers['x-timezone-offset'], 10);
+  const offsetMin = isNaN(tzOffset) ? 0 : tzOffset;
   const results = [];
 
   for (const dateStr of dates) {
@@ -1900,17 +1909,22 @@ app.post("/api/completions/backfill", requireFamilyAuth, requireAdmin, async (re
       continue;
     }
 
-    // Check for duplicate: same user+task+day already exists
-    const existing = db.prepare(
-      `SELECT id FROM completions WHERE family_id = ? AND task_id = ? AND user_id = ? AND status = 'approved' AND completed_at LIKE ?`
-    ).get(req.familyId, taskId, userId, dateStr + '%');
-    if (existing) {
+    // Noon in the client's local time, so the completion lands on that local day
+    const [y, mo, d] = dateStr.split("-").map(Number);
+    const noonMs = Date.UTC(y, mo - 1, d, 12) + offsetMin * 60000;
+    const completedAt = new Date(noonMs).toISOString();
+
+    // Check for duplicate: same user+task+local day already exists. A UTC-prefix
+    // match would count the previous local evening as this day.
+    const candidates = db.prepare(
+      `SELECT completed_at FROM completions WHERE family_id = ? AND task_id = ? AND user_id = ? AND status = 'approved' AND completed_at BETWEEN ? AND ?`
+    ).all(req.familyId, taskId, userId, new Date(noonMs - 86400000).toISOString(), new Date(noonMs + 86400000).toISOString());
+    if (candidates.some(c => dateKeyServer(c.completed_at, offsetMin) === dateStr)) {
       results.push({ date: dateStr, skipped: true, reason: "already exists" });
       continue;
     }
 
     const id = crypto.randomUUID();
-    const completedAt = dateStr + "T12:00:00.000Z"; // noon UTC as a neutral timestamp
 
     const completionData = {
       family_id: req.familyId, task_id: taskId, user_id: userId, status: 'approved',
@@ -2021,7 +2035,9 @@ app.patch("/api/completions/:id/approve", requireFamilyAuth, requireAdmin, async
   if (!c) return res.status(404).json({ error: "not found" });
   if (c.status !== "pending") return res.status(400).json({ error: "not pending" });
 
-  const checkedCriteria = req.body.criteria || [];
+  // Criteria the kid already claimed at completion are baked into rewards; don't apply them twice
+  const alreadyChecked = jsonOrDefault(c.bonus_criteria_checked, []);
+  const checkedCriteria = (req.body.criteria || []).filter((cid) => !alreadyChecked.includes(cid));
   let rewards = jsonOrDefault(c.rewards, {});
   let criteriaMultiplier = 1;
 
@@ -2041,14 +2057,19 @@ app.patch("/api/completions/:id/approve", requireFamilyAuth, requireAdmin, async
     }
   }
 
+  const allChecked = [...alreadyChecked, ...checkedCriteria];
+  const totalCriteriaMultiplier = Math.round((c.bonus_criteria_multiplier || 1) * criteriaMultiplier * 10000) / 10000;
+  const criteriaCheckedJson = allChecked.length > 0 ? JSON.stringify(allChecked) : null;
+  const criteriaMultiplierValue = totalCriteriaMultiplier !== 1 ? totalCriteriaMultiplier : null;
+
   const approvedAt = new Date().toISOString();
   db.prepare(`UPDATE completions SET status = 'approved', approved_at = ?, rewards = ?, bonus_criteria_checked = ?, bonus_criteria_multiplier = ? WHERE id = ?`)
-    .run(approvedAt, JSON.stringify(rewards), checkedCriteria.length > 0 ? JSON.stringify(checkedCriteria) : null, criteriaMultiplier !== 1 ? criteriaMultiplier : null, req.params.id);
+    .run(approvedAt, JSON.stringify(rewards), criteriaCheckedJson, criteriaMultiplierValue, req.params.id);
 
   emitEvent(req.familyId, "completions", req.params.id, "update", {
     status: 'approved', approved_at: approvedAt, rewards: JSON.stringify(rewards),
-    bonus_criteria_checked: checkedCriteria.length > 0 ? JSON.stringify(checkedCriteria) : null,
-    bonus_criteria_multiplier: criteriaMultiplier !== 1 ? criteriaMultiplier : null
+    bonus_criteria_checked: criteriaCheckedJson,
+    bonus_criteria_multiplier: criteriaMultiplierValue
   });
 
   creditRewardsServer(req.familyId, c.user_id, rewards);

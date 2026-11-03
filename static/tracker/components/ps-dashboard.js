@@ -112,14 +112,26 @@ class PsDashboard extends HTMLElement {
           this._penaltyCutoffForSession = user.lastPenaltySeenAt;
         }
         _penaltySeenCutoff = this._penaltyCutoffForSession;
-        const unseenCount = trackerStore.completions.data.filter(
-          (c) => c.userId === user.id && c.isPenalty && c.completedAt > _penaltySeenCutoff
-        ).length;
-        if (unseenCount > 0) {
-          tracker.setUserPref(user.id, "lastPenaltySeenAt", tracker.now());
-          user.lastPenaltySeenAt = tracker.getUserPref(user.id, "lastPenaltySeenAt");
-          // Staggered sad trombones — overlapping for crescendo
-          for (let i = 0; i < unseenCount; i++) {
+        // Sounds only for penalties not yet announced. The session cutoff above
+        // is just for NEW badges; comparing against it replayed every penalty
+        // since page load on each re-render.
+        const lastAnnounced = tracker.getUserPref(user.id, "lastPenaltySeenAt") || _penaltySeenCutoff;
+        const unseen = trackerStore.completions.data.filter(
+          (c) => c.userId === user.id && c.isPenalty && c.completedAt > lastAnnounced
+        );
+        if (unseen.length > 0) {
+          // Advance past the newest penalty too, in case the server clock is ahead of ours
+          const newest = unseen.reduce((max, c) => (c.completedAt > max ? c.completedAt : max), tracker.now());
+          tracker.setUserPref(user.id, "lastPenaltySeenAt", newest);
+          user.lastPenaltySeenAt = newest;
+          // Staggered sad trombones — overlapping for crescendo, capped at 3 per
+          // burst so a backlog (or penalties arriving one by one) doesn't turn
+          // into a cacophony
+          const nowMs = Date.now();
+          if (!this._tromboneBurst || nowMs > this._tromboneBurst.until) this._tromboneBurst = { count: 0, until: nowMs + 4000 };
+          const toPlay = Math.min(unseen.length, 3 - this._tromboneBurst.count);
+          this._tromboneBurst.count += toPlay;
+          for (let i = 0; i < toPlay; i++) {
             setTimeout(() => {
               if (typeof slopSFX !== "undefined") slopSFX.sadTrombone();
             }, i * 900);
