@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'parentslop-v17';
+const CACHE_VERSION = 'parentslop-v18';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

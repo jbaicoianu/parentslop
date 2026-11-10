@@ -148,6 +148,11 @@ async function run(base) {
   await req(`/api/project-picks/${pick.id}`, { method: "PUT", ...A, body: { outcome: "done" } });
   st = (await req("/api/projects/state", A)).json;
   assert(st.tasks.find((t) => t.id === t2.id).status === "done", "a pick marked done closes its task");
+  await req(`/api/project-picks/${pick.id}`, { method: "PUT", ...A, body: { outcome: "" } });
+  st = (await req("/api/projects/state", A)).json;
+  assert(st.tasks.find((t) => t.id === t2.id).status === "todo", "undoing a done pick reopens its task");
+  assert(st.picks.find((p) => p.id === pick.id).outcome === "", "undo clears the outcome");
+  await req(`/api/project-picks/${pick.id}`, { method: "PUT", ...A, body: { outcome: "done" } });
 
   console.log("\n-- tracks --");
   const TRACKS = [{ id: "fun", name: "Hobbies", icon: "🎮", color: "#4ade80", intention: "For fun", sort: 1 },

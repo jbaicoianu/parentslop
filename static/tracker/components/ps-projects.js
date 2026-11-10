@@ -419,9 +419,10 @@ class PsProjects extends HTMLElement {
           <div class="label">Next move</div>
           <div class="move">
             <div class="grow">
+              <button class="link proj move-proj" data-action="open-project" data-id="${move.project.id}"><i class="dot"></i>${this._esc(move.project.name)}</button>
               <div class="task-title"><span>${this._esc(move.task.title)}</span>
                 ${move.task.externalUrl ? `<a class="ext" href="${this._esc(move.task.externalUrl)}" target="_blank" rel="noopener">${this._esc(move.task.externalKey.split("/").pop())}</a>` : ""}</div>
-              <div class="meta">${focus.some((p) => p.id === move.project.id) ? "" : `${this._esc(move.project.name)} · `}${this._esc(move.task.size?.toUpperCase())} · ${this._esc(move.task.energy)} energy</div>
+              <div class="meta">${this._esc(move.task.size?.toUpperCase())} · ${this._esc(move.task.energy)} energy</div>
               <div class="reasons">${move.reasons.slice(0, 2).map((r) => `<span class="tag good">${this._esc(r)}</span>`).join("")}${move.warnings.map((w) => `<span class="tag warn">${this._esc(w)}</span>`).join("")}</div>
             </div>
             <div class="col">
@@ -472,9 +473,12 @@ class PsProjects extends HTMLElement {
           return `<li class="pick ${pk.outcome ? "o-" + pk.outcome : ""}" style="${this._trackStyle(this._trackOf(this._project(t.projectId)))}">
             <div class="grow">${this._taskLine(t, { showProject: true, pick: pk })}</div>
             <div class="btns">
-              ${[["done", "Done"], ["partial", "Partly"], ["skipped", "Skip"]].map(([o, l]) =>
-                `<button class="chip ${pk.outcome === o ? "on" : ""}" data-action="outcome" data-id="${pk.id}" data-outcome="${pk.outcome === o ? "" : o}">${l}</button>`).join("")}
-              <button class="chip ghost" title="Remove from today" data-action="unpick" data-id="${pk.id}">✕</button>
+              ${pk.outcome ? `
+                <span class="outcome o-${pk.outcome}">${{ done: "✓ Done", partial: "◐ Partly done", skipped: "Skipped" }[pk.outcome] || ""}</span>
+                <button class="chip ghost" data-action="outcome" data-id="${pk.id}" data-outcome="" title="${pk.outcome === "done" ? "Mark this task not done again" : "Clear the outcome"}">Undo</button>`
+              : `${[["done", "Mark done"], ["partial", "Partly"], ["skipped", "Skip"]].map(([o, l]) =>
+                  `<button class="chip" data-action="outcome" data-id="${pk.id}" data-outcome="${o}">${l}</button>`).join("")}
+                <button class="chip ghost" title="Remove from today" data-action="unpick" data-id="${pk.id}">✕</button>`}
             </div></li>`;
         }).join("")}</ul>
       </section>` : ""}
@@ -834,6 +838,12 @@ class PsProjects extends HTMLElement {
         .list li.closed .task-title span { text-decoration: line-through; }
         .pick.o-done { border-color: #2d6b45; background: #13261c; }
         .pick.o-skipped { opacity: 0.6; }
+        .pick.o-done .task-title span { text-decoration: line-through; opacity: 0.75; }
+        .outcome { font-size: 0.8rem; font-weight: 600; padding: 4px 8px; white-space: nowrap; }
+        .outcome.o-done { color: #4ade80; }
+        .outcome.o-partial { color: #fbbf24; }
+        .outcome.o-skipped { color: var(--muted); }
+        .link.proj.move-proj { display: flex; width: fit-content; font-size: 0.78rem; margin-bottom: 2px; }
         .task-title { font-size: 0.92rem; font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
         .meta { font-size: 0.76rem; color: var(--muted); margin-top: 3px; }
         .meta.notes { white-space: pre-wrap; }
