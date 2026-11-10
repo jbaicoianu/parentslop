@@ -7,6 +7,7 @@ const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 const { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const eventLog = require("./lib/event-log");
+const projectsModule = require("./lib/projects");
 const { initFieldVersionsTable, buildFields, updateFieldVersions, clearFieldVersions, applyEvent, EVENT_TABLES, PK_COL, BALANCE_TABLES } = require("./lib/apply-event");
 
 const CRSQLITE_EXT = path.join(__dirname, "node_modules/@vlcn.io/crsqlite/dist/crsqlite");
@@ -420,6 +421,9 @@ function initDb() {
     )
   `);
 
+  // Projects module tables (CRRs)
+  projectsModule.initProjectsSchema(db);
+
   // --- Event log: field_versions table (LWW version tracking) ---
   initFieldVersionsTable(db);
 }
@@ -474,6 +478,7 @@ const FAMILY_SNAPSHOT_TABLES = [
   "stores", "feedback", "tasks", "users", "currencies", "shop_items",
   "completions", "redemptions", "balance_adjustments", "job_claims", "worklog_entries",
   "meal_options", "meal_votes", "meal_plan", "meal_log",
+  "project_tracks", "projects", "project_members", "project_tasks", "project_picks",
   "user_balances", "field_versions",
 ];
 
@@ -767,6 +772,13 @@ const ADMIN_WRITE_KEYS = new Set([
   "stability_api_key",
 ]);
 
+// Secrets only admins may read back through the generic store API.
+const ADMIN_READ_KEYS = new Set(["stability_api_key"]);
+
+// Per-member secrets (github_token:<member id>) are managed only by their own module endpoints;
+// the generic store API refuses them for everyone, so one parent can't read another's token.
+const PRIVATE_KEY_RE = /^github_token(:|$)/;
+
 // --- Middleware ---------------------------------------------------------------
 
 app.use(express.json({ limit: "5mb" }));
@@ -788,6 +800,11 @@ app.get("/api/health", (_req, res) => res.json({ ok: true, instance: SITE_ID }))
 
 // GET /api/store/:key — read a single store
 app.get("/api/store/:key", requireFamilyAuth, (req, res) => {
+  if (PRIVATE_KEY_RE.test(req.params.key)) return res.status(403).json({ error: "not available" });
+  if (ADMIN_READ_KEYS.has(req.params.key)) {
+    const member = req.memberId && db.prepare("SELECT is_admin FROM family_members WHERE id = ? AND family_id = ?").get(req.memberId, req.familyId);
+    if (!member || !member.is_admin) return res.status(403).json({ error: "admin required" });
+  }
   const nsKey = `${req.familyId}:${req.params.key}`;
   const row = db.prepare("SELECT key, value, updated_at FROM stores WHERE key = ?").get(nsKey);
   if (!row) return res.status(404).json({ error: "not found" });
@@ -797,6 +814,7 @@ app.get("/api/store/:key", requireFamilyAuth, (req, res) => {
 
 // PUT /api/store/:key — upsert a single store
 app.put("/api/store/:key", requireFamilyAuth, async (req, res) => {
+  if (PRIVATE_KEY_RE.test(req.params.key)) return res.status(403).json({ error: "not available" });
   // Admin-only key authorization
   if (ADMIN_WRITE_KEYS.has(req.params.key)) {
     if (!req.memberId) return res.status(403).json({ error: "no member selected" });
@@ -821,6 +839,7 @@ app.post("/api/store/sync", requireFamilyAuth, async (req, res) => {
   const { stores } = req.body;
   if (!stores || typeof stores !== "object") return res.status(400).json({ error: "missing stores object" });
 
+  if (Object.keys(stores).some((k) => PRIVATE_KEY_RE.test(k))) return res.status(403).json({ error: "not available" });
   // Admin-only key authorization
   const hasAdminKeys = Object.keys(stores).some(k => ADMIN_WRITE_KEYS.has(k));
   if (hasAdminKeys) {
@@ -892,6 +911,7 @@ app.post("/api/auth/register", registerLimiter, async (req, res) => {
 
     db.prepare("INSERT INTO families (id, name, slug, password_hash, salt, auth_level, created_at) VALUES (?, ?, ?, ?, ?, 'none', ?)").run(familyId, familyName.trim(), slug, hash, salt, now);
     db.prepare("INSERT INTO family_members (id, family_id, display_name, is_admin, created_at) VALUES (?, ?, ?, 1, ?)").run(memberId, familyId, adminName.trim(), now);
+    ensureMemberUser(familyId, memberId);
 
     const session = createSession(familyId, memberId);
     setCookie(res, session.id);
@@ -943,6 +963,7 @@ app.get("/api/auth/me", (req, res) => {
   const currentMember = session.member_id
     ? members.find((m) => m.id === session.member_id) || null
     : null;
+  if (currentMember) ensureMemberUser(family.id, currentMember.id);
 
   res.json({
     authenticated: true,
@@ -968,6 +989,22 @@ app.get("/api/auth/me", (req, res) => {
   });
 });
 
+// Every login member needs a matching users row (same id): the client finds the current user by the
+// member id, and without one it renders an empty app with no way to switch back. Members created
+// before this was enforced get their row on next login or page load.
+function ensureMemberUser(familyId, memberId) {
+  if (db.prepare("SELECT 1 FROM users WHERE id = ? AND family_id = ?").get(memberId, familyId)) return;
+  const member = db.prepare("SELECT display_name, is_admin FROM family_members WHERE id = ? AND family_id = ?").get(memberId, familyId);
+  if (!member) return;
+  const rowData = { family_id: familyId, name: member.display_name || "", role: member.is_admin ? "parent" : "kid", avatar: "", tags: "[]", created_at: new Date().toISOString() };
+  db.prepare("INSERT INTO users (id, family_id, name, role, avatar, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(memberId, familyId, rowData.name, rowData.role, rowData.avatar, rowData.tags, rowData.created_at);
+  emitEvent(familyId, "users", memberId, "insert", rowData);
+  const obj = userRowToObj(db.prepare("SELECT * FROM users WHERE id = ?").get(memberId));
+  obj.balances = {};
+  broadcastSSE(familyId, "user:created", obj);
+}
+
 // POST /api/auth/select-member — set member in session
 app.post("/api/auth/select-member", pinLimiter, requireFamilyAuth, async (req, res) => {
   try {
@@ -992,6 +1029,7 @@ app.post("/api/auth/select-member", pinLimiter, requireFamilyAuth, async (req, r
     }
 
     updateSession(req.sessionId, { member_id: memberId });
+    ensureMemberUser(req.familyId, memberId);
     res.json({ ok: true });
   } catch (err) {
     console.error("Select member error:", err);
@@ -1021,6 +1059,7 @@ app.post("/api/auth/add-member", requireFamilyAuth, requireAdmin, (req, res) => 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   db.prepare("INSERT INTO family_members (id, family_id, display_name, is_admin, created_at) VALUES (?, ?, ?, ?, ?)").run(id, req.familyId, displayName.trim(), isAdmin ? 1 : 0, now);
+  ensureMemberUser(req.familyId, id);
 
   res.json({ ok: true, id, displayName: displayName.trim() });
 });
@@ -1615,7 +1654,14 @@ app.get("/api/users", requireFamilyAuth, (req, res) => {
 
 app.post("/api/users", requireFamilyAuth, requireAdmin, async (req, res) => {
   const u = req.body;
-  const id = crypto.randomUUID();
+  // A users row for a login member must share the member's id. If the caller names a member of this
+  // family, use (or return) that row; otherwise this is a non-login user (e.g. a pet) with a fresh id.
+  const isMember = typeof u.id === "string" && db.prepare("SELECT 1 FROM family_members WHERE id = ? AND family_id = ?").get(u.id, req.familyId);
+  if (isMember) {
+    const row = db.prepare("SELECT * FROM users WHERE id = ? AND family_id = ?").get(u.id, req.familyId);
+    if (row) { const obj = userRowToObj(row); obj.balances = {}; return res.json(obj); }
+  }
+  const id = isMember ? u.id : crypto.randomUUID();
   const now = new Date().toISOString();
   const rowData = { family_id: req.familyId, name: u.name || '', role: u.role || 'kid', avatar: u.avatar || '', tags: JSON.stringify(u.tags || []), created_at: now };
   db.prepare("INSERT INTO users (id, family_id, name, role, avatar, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
@@ -2638,6 +2684,9 @@ app.delete("/api/meal-log/:id", requireFamilyAuth, async (req, res) => {
 });
 
 // --- Sync (cr-sqlite pod-to-pod) ---------------------------------------------
+
+// --- Projects module (admin-only personal backlog) -----------------------------
+projectsModule.registerProjects({ app, db: { prepare: (...a) => db.prepare(...a), transaction: (fn) => db.transaction(fn) }, emitEvent, broadcastSSE, requireFamilyAuth, requireAdmin });
 
 const SYNC_SECRET = process.env.SYNC_SECRET || null;
 const SYNC_PEERS = (process.env.SYNC_PEERS || "").split(",").map(s => s.trim()).filter(Boolean);

@@ -1,0 +1,143 @@
+#!/usr/bin/env node
+// tools/projects — CLI for the Projects module
+//
+// Usage:
+//   tools/projects import [projects.json]   # load/refresh projects from the project-backlog inventory
+//                                           #   (default ~/src/project-backlog/data/projects.json)
+//   tools/projects sync-github              # pull linked GitHub issues (via your local `gh` login)
+//   tools/projects today [minutes] [energy] # print today's suggestions and picks
+//
+// Talks to a running server. Auth env vars (same as tools/feedback):
+//   PARENTSLOP_URL      (default: http://localhost:8080; use https://parentslop.com for production)
+//   PARENTSLOP_FAMILY   (family name)
+//   PARENTSLOP_PASSWORD (family password)
+//   PARENTSLOP_MEMBER   (admin member name)
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { execFileSync } = require("child_process");
+const ProjectsScore = require("../static/tracker/projects-score.js");
+
+const BASE = (process.env.PARENTSLOP_URL || "http://localhost:8080").replace(/\/$/, "");
+const c = { reset: "\x1b[0m", dim: "\x1b[2m", cyan: "\x1b[36m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", bold: "\x1b[1m" };
+let cookie = "";
+
+function die(msg) { console.error(`${c.red}${msg}${c.reset}`); process.exit(1); }
+
+async function api(urlPath, { method = "GET", body } = {}) {
+  const send = () => fetch(BASE + urlPath, {
+    method,
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let res;
+  // A slow `gh` walk can outlast the server's keep-alive; retry once on a dropped connection.
+  try { res = await send(); } catch (e) { if (e.message !== "fetch failed") throw e; res = await send(); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${method} ${urlPath}: ${data.error || res.status}`);
+  return { res, data };
+}
+
+async function login() {
+  const { PARENTSLOP_FAMILY: family, PARENTSLOP_PASSWORD: password, PARENTSLOP_MEMBER: memberName } = process.env;
+  if (!family || !password || !memberName) die("Set PARENTSLOP_FAMILY, PARENTSLOP_PASSWORD and PARENTSLOP_MEMBER");
+  const { res, data } = await api("/api/auth/login", { method: "POST", body: { familyName: family, password } });
+  if (!data.ok) die(`Login failed: ${data.error || "unknown error"}`);
+  const m = (res.headers.get("set-cookie") || "").match(/session=([^;]+)/);
+  if (!m) die("No session cookie in login response");
+  cookie = `session=${m[1]}`;
+  const me = (await api("/api/auth/me")).data;
+  const member = (me.members || []).find((x) => x.displayName.toLowerCase() === memberName.toLowerCase() || x.id === memberName);
+  if (!member) die(`No member named ${memberName}`);
+  await api("/api/auth/select-member", { method: "POST", body: { memberId: member.id } });
+}
+
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+async function cmdImport(file) {
+  const src = file || path.join(os.homedir(), "src/project-backlog/data/projects.json");
+  const rows = JSON.parse(fs.readFileSync(src, "utf8"));
+  // tracks.json sits next to projects.json; tracks are created once, then edited in the app.
+  const tracksFile = path.join(path.dirname(src), "tracks.json");
+  const tracks = fs.existsSync(tracksFile) ? JSON.parse(fs.readFileSync(tracksFile, "utf8")) : [];
+  const { data } = await api("/api/projects/import", { method: "POST", body: { projects: rows, tracks } });
+  console.log(`${c.green}Imported ${rows.length} rows:${c.reset} ${data.created} new projects, ${data.updated} updated, ${data.tasksCreated} starter tasks, ${data.tracksCreated} new tracks.`);
+}
+
+function gh(args) {
+  return JSON.parse(execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
+}
+
+// An epic's sub-issue tree, leaves only, with blocked-by numbers.
+function epicTree(repo, number) {
+  const out = [];
+  const walk = (n, parentTitle, depth) => {
+    if (depth > 6) return;
+    for (const s of gh(["api", `repos/${repo}/issues/${n}/sub_issues?per_page=100`])) {
+      const isEpic = (s.labels || []).some((l) => l.name === "epic");
+      if (!isEpic) out.push({ number: s.number, title: s.title, state: s.state, url: s.html_url, labels: s.labels, updatedAt: s.updated_at, parentTitle });
+      walk(s.number, isEpic ? s.title : parentTitle, depth + 1);
+    }
+  };
+  walk(number, "", 0);
+  for (const it of out) {
+    try { it.blockedBy = gh(["api", `repos/${repo}/issues/${it.number}/dependencies/blocked_by`]).map((b) => b.number); }
+    catch { it.blockedBy = []; }
+  }
+  return out;
+}
+
+async function cmdSyncGithub() {
+  const { data } = await api("/api/projects/state");
+  // Epic links first so their sub-issues are claimed before whole-repo links run.
+  const jobs = data.projects.flatMap((p) => p.links.filter((l) => l.type === "github").map((l) => ({ p, ...l })))
+    .sort((a, b) => (b.issue ? 1 : 0) - (a.issue ? 1 : 0));
+  if (!jobs.length) return console.log("No projects have GitHub links.");
+  for (const j of jobs) {
+    const label = `${j.repo}${j.issue ? "#" + j.issue : ""}`;
+    try {
+      const items = j.issue
+        ? epicTree(j.repo, j.issue)
+        : gh(["issue", "list", "-R", j.repo, "--state", "all", "--limit", "300", "--json", "number,title,state,url,labels,updatedAt"]);
+      const r = (await api(`/api/projects/${j.p.id}/external-sync`, {
+        method: "POST", body: { source: "github", repo: j.repo, items, claim: !!j.issue },
+      })).data;
+      console.log(`${c.cyan}${j.p.name}${c.reset} ← ${label}: ${items.length} issues; ${r.created} new, ${r.updated} updated, ${r.closed} closed${r.skipped ? `, ${r.skipped} left with other projects` : ""}`);
+    } catch (e) {
+      console.log(`${c.yellow}${j.p.name} ← ${label}: ${e.message.split("\n")[0]}${c.reset}`);
+    }
+  }
+}
+
+async function cmdToday(minutes, energy) {
+  const { data } = await api("/api/projects/state");
+  const t = today();
+  const byTask = new Map(data.tasks.map((x) => [x.id, x]));
+  const byProject = new Map(data.projects.map((x) => [x.id, x]));
+  const picks = data.picks.filter((p) => p.date === t);
+  console.log(`${c.bold}Today (${t})${c.reset}`);
+  if (!picks.length) console.log(`  ${c.dim}nothing picked yet${c.reset}`);
+  for (const pk of picks) {
+    const task = byTask.get(pk.taskId);
+    if (task) console.log(`  [${pk.outcome || " "}] ${byProject.get(task.projectId)?.name}: ${task.title}`);
+  }
+  const sugg = ProjectsScore.suggest(data, { today: t, minutes: Number(minutes) || 120, energy: energy || "medium" });
+  console.log(`\n${c.bold}Suggestions${c.reset}`);
+  for (const s of sugg) {
+    console.log(`  ${c.green}${String(Math.round(s.score)).padStart(3)}${c.reset}  ${c.cyan}${s.project.name}${c.reset}: ${s.task.title}`);
+    if (s.reasons.length || s.warnings.length) console.log(`       ${c.dim}${[...s.reasons.slice(0, 3), ...s.warnings].join(" · ")}${c.reset}`);
+  }
+}
+
+(async () => {
+  const [cmd = "today", ...rest] = process.argv.slice(2);
+  if (!["import", "sync-github", "today"].includes(cmd)) die("Usage: tools/projects [import [file]|sync-github|today [minutes] [energy]]");
+  await login();
+  if (cmd === "import") await cmdImport(rest[0]);
+  else if (cmd === "sync-github") await cmdSyncGithub();
+  else await cmdToday(rest[0], rest[1]);
+})().catch((e) => die(e.message));

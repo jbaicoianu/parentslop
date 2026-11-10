@@ -73,6 +73,7 @@ class PsAdminModules extends HTMLElement {
     const AVAILABLE = [
       { id: "meals", name: "Meals", description: "Plan meals, vote on options, track what's eaten", icon: "\uD83C\uDF7D" },
       { id: "games", name: "Games", description: "Mini-games and activities", icon: "\u25B6" },
+      { id: "projects", name: "Projects", description: "Parents' own project backlog: tasks, dependencies, GitHub issues and a daily pick list", icon: "\u25A6" },
     ];
 
     const mealsEnabled = tracker.isModuleEnabled("meals");

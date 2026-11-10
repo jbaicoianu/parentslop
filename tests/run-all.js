@@ -12,6 +12,8 @@ const suites = [
   "tests/fuzz.js",
   "tests/sync.test.js",
   "tests/event-log.test.js",
+  "tests/projects.test.js",
+  "tests/members.test.js",
 ];
 
 let anyFailed = false;

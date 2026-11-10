@@ -719,7 +719,8 @@ async function createUser(data) {
     method: "POST",
     body: JSON.stringify(data),
   });
-  _state.users.push(user);
+  // The server may have created this row already (add-member) and announced it over SSE.
+  if (!_state.users.find((u) => u.id === user.id)) _state.users.push(user);
   _attachUserPrefs(_state.users);
   bus.emit("user:changed");
   return user;
@@ -1279,6 +1280,10 @@ function _connectSSE() {
 
     _sseSource.addEventListener("meals:changed", () => {
       _refreshMeals();
+    });
+
+    _sseSource.addEventListener("projects:changed", () => {
+      bus.emit("projects:changed");
     });
   } catch (e) {
     console.warn("SSE connection failed:", e);

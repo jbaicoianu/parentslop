@@ -117,6 +117,7 @@ class PsNavBar extends HTMLElement {
       { id: "games", label: "Games", icon: "\u25B6", module: "games" },
     ];
     if (isAdmin) {
+      tabs.push({ id: "projects", label: "Projects", icon: "\u25A6", module: "projects" });
       tabs.push({ id: "admin", label: "Admin", icon: "\u2699" });
     }
     return tabs.filter(t => !t.module || tracker.isModuleEnabled(t.module));

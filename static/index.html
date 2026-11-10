@@ -397,6 +397,9 @@
           <!-- Meals -->
           <ps-meals id="view-meals"></ps-meals>
 
+          <!-- Projects (parents' backlog) -->
+          <ps-projects id="view-projects"></ps-projects>
+
           <!-- Games tab -->
           <div id="view-games">
             <div style="border-radius:24px; padding:18px; background:radial-gradient(circle at top left,#1a1c2a,#090a13); border:1px solid #25273a; box-shadow:0 14px 30px rgba(0,0,0,0.55);">
@@ -508,6 +511,8 @@
   <script src="/tracker/components/ps-balance-chart.js"></script>
   <script src="/tracker/components/ps-history.js"></script>
   <script src="/tracker/components/ps-meals.js"></script>
+  <script src="/tracker/projects-score.js"></script>
+  <script src="/tracker/components/ps-projects.js"></script>
   <script src="/tracker/components/ps-admin-modules.js"></script>
   <script src="/tracker/components/ps-feedback-fab.js"></script>
 
@@ -940,13 +945,17 @@
       }
 
       // ---- Hash-based routing ----
-      const VALID_VIEWS = ['dashboard', 'tasks', 'shop', 'history', 'meals', 'games', 'admin'];
+      const VALID_VIEWS = ['dashboard', 'tasks', 'shop', 'history', 'meals', 'games', 'projects', 'admin'];
 
       function parseHash() {
         const hash = location.hash.replace(/^#/, '');
         if (!hash) return { view: 'dashboard', adminTab: null };
         if (hash.startsWith('admin/')) {
           return { view: 'admin', adminTab: hash.slice(6) || 'tasks' };
+        }
+        // Projects keeps its own sub-route after the slash (projects/list, projects/p/<id>)
+        if (hash.startsWith('projects/')) {
+          return { view: 'projects', adminTab: null };
         }
         if (VALID_VIEWS.includes(hash)) {
           return { view: hash, adminTab: null };

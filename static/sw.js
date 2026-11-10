@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'parentslop-v13';
+const CACHE_VERSION = 'parentslop-v17';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -24,6 +24,8 @@ const STATIC_ASSETS = [
   '/tracker/components/ps-admin-security.js',
   '/tracker/components/ps-history.js',
   '/tracker/components/ps-feedback-fab.js',
+  '/tracker/projects-score.js',
+  '/tracker/components/ps-projects.js',
 ];
 
 // Pre-cache static assets on install

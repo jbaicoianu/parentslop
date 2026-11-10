@@ -20,11 +20,10 @@ class PsBalanceBar extends HTMLElement {
   }
 
   render() {
-    const user = tracker.getCurrentUser();
-    if (!user) { this.shadowRoot.innerHTML = ""; return; }
-
-    const currencies = trackerStore.currencies.data;
-    if (currencies.length === 0) { this.shadowRoot.innerHTML = ""; return; }
+    // Always render the bar while the app is showing: it holds the only "Switch User" button, so
+    // hiding it (no matching user, no currencies yet) would leave no way back to another member.
+    const user = tracker.getCurrentUser() || { id: null, name: "Unknown user", role: "" };
+    const currencies = user.id ? trackerStore.currencies.data : [];
 
     const balances = currencies.map((c) => {
       const raw = tracker.getBalance(user.id, c.id);
@@ -106,7 +105,7 @@ class PsBalanceBar extends HTMLElement {
         }
       </style>
       <div class="bar">
-        <div class="user-name">${user.name}${user.role === "parent" ? " ⚙" : user.role === "pet" ? " 🐾" : ""}</div>
+        <div class="user-name">${String(user.name).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch])}${user.role === "parent" ? " ⚙" : user.role === "pet" ? " 🐾" : ""}</div>
         ${balances
           .map(
             (b) => `
