@@ -1285,6 +1285,10 @@ function _connectSSE() {
     _sseSource.addEventListener("projects:changed", () => {
       bus.emit("projects:changed");
     });
+
+    _sseSource.addEventListener("shared-menus:changed", () => {
+      bus.emit("shared-menus:changed");
+    });
   } catch (e) {
     console.warn("SSE connection failed:", e);
     setTimeout(() => _connectSSE(), 5000);

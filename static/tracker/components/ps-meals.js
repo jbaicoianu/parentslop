@@ -11,15 +11,142 @@ class PsMeals extends HTMLElement {
     this._planMode = false; // drag-and-drop sidebar on week view
     this._selectedMealForPlacement = null; // mobile tap-to-place
     this._generatingImageId = null; // meal option id currently generating
+    this._sharedMenus = null; // list for the Shared tab (null = not loaded)
+    this._sharedOpenId = null; // shared menu being viewed
+    this._sharedEl = null; // persistent <ps-shared-menu> so live updates and drafts survive re-renders
+    this._showNewShared = false;
     this._unsubs = [];
   }
 
   connectedCallback() {
     this._unsubs.push(
-      eventBus.on("meals:changed", () => this.render()),
+      // An open shared menu updates itself; don't tear it down for unrelated meal changes.
+      eventBus.on("meals:changed", () => { if (this._view !== "shared") this.render(); }),
       eventBus.on("user:changed", () => this.render()),
+      eventBus.on("shared-menus:changed", () => { if (this._view === "shared" && !this._sharedOpenId) this._loadSharedMenus(); }),
     );
     this.render();
+  }
+
+  // --- Shared menus (potluck checklists shared by link) ---
+  async _loadSharedMenus() {
+    try {
+      this._sharedMenus = await tracker.apiFetch("/api/shared-menus");
+    } catch (e) {
+      console.error("Load shared menus error:", e);
+      if (!this._sharedMenus) this._sharedMenus = [];
+    }
+    if (this._view === "shared" && !this._sharedOpenId) this.render();
+  }
+
+  _nextThanksgiving() {
+    // US Thanksgiving: fourth Thursday of November (this year's, or next year's once it has passed).
+    const today = this._todayStr();
+    for (let y = new Date().getFullYear(); ; y++) {
+      const firstDow = new Date(y, 10, 1).getDay();
+      const day = 1 + ((4 - firstDow + 7) % 7) + 21;
+      const ymd = `${y}-11-${String(day).padStart(2, "0")}`;
+      if (ymd >= today) return ymd;
+    }
+  }
+
+  _openSharedMenu(id) {
+    this._sharedOpenId = id;
+    this._showNewShared = false;
+    this.render();
+  }
+
+  _renderShared() {
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    if (this._sharedOpenId) {
+      return `<div class="shared-detail">
+        <button class="btn btn-small" data-action="shared-back">← All shared menus</button>
+        <div id="shared-slot"></div>
+      </div>`;
+    }
+    const isAdmin = tracker.isCurrentUserAdmin();
+    const menus = this._sharedMenus;
+    const today = this._todayStr();
+    const newForm = this._showNewShared ? `
+      <div class="meal-form shared-new">
+        <input type="text" class="input" id="shared-title" maxlength="120" value="Thanksgiving dinner" placeholder="What are you planning?" />
+        <input type="date" class="input" id="shared-date" value="${this._nextThanksgiving()}" />
+        <select class="input" id="shared-template">
+          <option value="thanksgiving">Start with a Thanksgiving checklist</option>
+          <option value="">Start empty</option>
+        </select>
+        <div class="form-actions">
+          <button class="btn btn-primary" data-action="shared-create">Create</button>
+          <button class="btn" data-action="shared-cancel-new">Cancel</button>
+        </div>
+      </div>` : "";
+    let list;
+    if (menus === null) list = `<div class="empty">Loading…</div>`;
+    else if (!menus.length) list = `<div class="empty">No shared menus yet. Plan a potluck or holiday meal with friends: share a link, and everyone can add dishes, claim what they're bringing and comment.</div>`;
+    else {
+      list = menus.map((m) => {
+        const past = m.eventDate && m.eventDate < today;
+        const date = m.eventDate ? new Date(m.eventDate + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "No date";
+        const open = m.itemCount - m.claimedCount;
+        return `<button class="shared-card ${past ? "past" : ""}" data-action="shared-open" data-id="${esc(m.id)}">
+          <div class="shared-card-title">${esc(m.title)}</div>
+          <div class="shared-card-meta">${esc(date)} · ${m.itemCount} item${m.itemCount === 1 ? "" : "s"}${m.itemCount ? ` · ${open ? `${open} unclaimed` : "all claimed"}` : ""}${m.guestCount ? ` · ${m.guestCount} guest${m.guestCount === 1 ? "" : "s"}` : ""}${m.shareEnabled ? "" : " · \u{1F512} link off"}</div>
+        </button>`;
+      }).join("");
+    }
+    return `
+      <div class="shared-head">
+        <div class="shared-intro">Menus you plan together with friends and family outside the house.</div>
+        ${isAdmin && !this._showNewShared ? `<button class="btn btn-primary btn-small" data-action="shared-new">+ New shared menu</button>` : ""}
+      </div>
+      ${newForm}
+      <div class="shared-list">${list}</div>`;
+  }
+
+  _attachShared() {
+    const sr = this.shadowRoot;
+    const slot = sr.getElementById("shared-slot");
+    if (slot) {
+      if (!this._sharedEl) {
+        this._sharedEl = document.createElement("ps-shared-menu");
+        this._sharedEl.addEventListener("menu-deleted", () => {
+          this._sharedOpenId = null;
+          this._sharedEl = null;
+          this._loadSharedMenus();
+          this.render();
+        });
+      }
+      if (this._sharedEl.getAttribute("menu-id") !== this._sharedOpenId) this._sharedEl.setAttribute("menu-id", this._sharedOpenId);
+      this._sharedEl.suggestions = trackerStore.mealOptions.data.filter(o => !o.archived).map(o => o.name);
+      slot.appendChild(this._sharedEl);
+    }
+
+    sr.querySelectorAll("[data-action='shared-back']").forEach(b => b.addEventListener("click", () => {
+      this._sharedOpenId = null;
+      this._sharedEl?.remove();
+      this._sharedEl = null;
+      this._loadSharedMenus();
+      this.render();
+    }));
+    sr.querySelectorAll("[data-action='shared-open']").forEach(b => b.addEventListener("click", () => this._openSharedMenu(b.dataset.id)));
+    sr.querySelectorAll("[data-action='shared-new']").forEach(b => b.addEventListener("click", () => { this._showNewShared = true; this.render(); }));
+    sr.querySelectorAll("[data-action='shared-cancel-new']").forEach(b => b.addEventListener("click", () => { this._showNewShared = false; this.render(); }));
+    sr.querySelectorAll("[data-action='shared-create']").forEach(b => b.addEventListener("click", async () => {
+      const title = sr.getElementById("shared-title")?.value?.trim();
+      if (!title) return;
+      b.disabled = true;
+      try {
+        const menu = await tracker.apiFetch("/api/shared-menus", {
+          method: "POST",
+          body: JSON.stringify({ title, eventDate: sr.getElementById("shared-date")?.value || "", template: sr.getElementById("shared-template")?.value || "" }),
+        });
+        this._sharedMenus = null;
+        this._openSharedMenu(menu.id);
+      } catch (e) {
+        b.disabled = false;
+        alert(e.message || "Couldn't create the menu");
+      }
+    }));
   }
 
   disconnectedCallback() {
@@ -601,11 +728,25 @@ class PsMeals extends HTMLElement {
       .picker-close { width: 100%; }
 
       .week-cell.today { border-color: rgba(74, 222, 128, 0.3); }
+
+      /* Shared menus */
+      .shared-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+      .shared-intro { font-size: 0.82rem; color: #a0a4be; }
+      .shared-new { margin-bottom: 14px; }
+      .shared-list { display: flex; flex-direction: column; gap: 8px; }
+      .shared-card { text-align: left; background: #12131f; border: 1px solid #25273a; border-radius: 14px; padding: 12px 14px;
+                     color: #e2e4f0; cursor: pointer; font: inherit; }
+      .shared-card:hover { border-color: #3a3d55; }
+      .shared-card.past { opacity: 0.6; }
+      .shared-card-title { font-weight: 700; font-size: 0.98rem; }
+      .shared-card-meta { font-size: 0.78rem; color: #a0a4be; margin-top: 3px; }
+      .shared-detail > .btn { margin-bottom: 12px; }
     `;
 
     let contentHTML;
     if (this._view === "today") contentHTML = this._renderToday();
     else if (this._view === "week") contentHTML = this._renderWeek();
+    else if (this._view === "shared") contentHTML = this._renderShared();
     else contentHTML = this._renderMenu();
 
     this.shadowRoot.innerHTML = `
@@ -615,6 +756,7 @@ class PsMeals extends HTMLElement {
           <button class="tab ${this._view === "today" ? "active" : ""}" data-tab="today">Today</button>
           <button class="tab ${this._view === "week" ? "active" : ""}" data-tab="week">Week</button>
           <button class="tab ${this._view === "menu" ? "active" : ""}" data-tab="menu">Menu</button>
+          <button class="tab ${this._view === "shared" ? "active" : ""}" data-tab="shared">Shared</button>
         </div>
         ${contentHTML}
       </div>
@@ -630,14 +772,26 @@ class PsMeals extends HTMLElement {
     // Tab switching
     sr.querySelectorAll(".tab").forEach(btn => {
       btn.addEventListener("click", () => {
+        const wasShared = this._view === "shared";
         this._view = btn.dataset.tab;
         this._showAddForm = false;
         this._editingOptionId = null;
         this._pendingImageDataUrl = null;
         this._selectedMealForPlacement = null;
+        if (this._view === "shared" && !wasShared) {
+          this._loadSharedMenus();
+        } else if (this._view === "shared") {
+          // Re-tapping "Shared" while a menu is open goes back to the list.
+          this._sharedOpenId = null;
+          this._sharedEl?.remove();
+          this._sharedEl = null;
+          this._loadSharedMenus();
+        }
         this.render();
       });
     });
+
+    this._attachShared();
 
     // Week navigation
     sr.querySelectorAll("[data-action='prev-week']").forEach(b => b.addEventListener("click", () => { this._weekOffset--; this.render(); }));

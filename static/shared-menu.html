@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="theme-color" content="#090a13" />
+  <title>Shared menu</title>
+  <style>
+    html, body { margin: 0; background: #090a13; color: #e2e4f0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { min-height: 100vh; background: radial-gradient(circle at top left, #1a1c2a, #090a13 60%); }
+    main { max-width: 680px; margin: 0 auto; padding: 20px 16px 48px; }
+    footer { text-align: center; font-size: 0.72rem; color: #5d6180; padding: 0 16px 24px; }
+  </style>
+</head>
+<body>
+  <main><ps-shared-menu id="menu"></ps-shared-menu></main>
+  <footer>Shared menu · planned together on ParentSlop</footer>
+  <script src="/tracker/components/ps-shared-menu.js"></script>
+  <script>
+    (function () {
+      var token = decodeURIComponent((location.pathname.match(/^\/m\/([^/]+)/) || [])[1] || "");
+      var el = document.getElementById("menu");
+      el.setAttribute("token", token);
+      // Keep the tab title in sync with the menu's title.
+      var obs = new MutationObserver(function () {
+        var h1 = el.shadowRoot && el.shadowRoot.querySelector("h1");
+        if (h1) document.title = h1.textContent + " · Shared menu";
+      });
+      obs.observe(el.shadowRoot, { childList: true, subtree: true });
+    })();
+  </script>
+</body>
+</html>

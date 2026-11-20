@@ -47,3 +47,13 @@ Parents-only personal project backlog (module id `projects`, nav tab "Projects")
 - CLI: `tools/projects import|sync-github|today` (same PARENTSLOP_* auth env vars as `tools/feedback`). The inventory lives in `~/src/project-backlog/data/projects.json` (with `tracks.json` beside it); GitHub sync uses the local `gh` login.
 - GitHub links: `{type:"github", repo}` pulls all issues; `{type:"github", repo, issue}` pulls an epic's sub-issue tree with blocked-by edges as dependencies. Epic links claim their issues before whole-repo links.
 - Tests: `tests/projects.test.js`.
+
+## Shared menus
+
+Potluck-style menu checklists (Thanksgiving dinner...) planned with people outside the family. Meals > Shared tab.
+
+- **Access:** a menu belongs to one family. Family members use `/api/shared-menus/:id/*` with their session (any member edits items; parents create menus, control the link, delete). Anyone with the link opens `/m/<token>` (`static/shared-menu.html`) and uses `/api/m/:token/*`; they join with a name, which creates a `shared_menu_participants` row and an httpOnly `psm_<menu id>` cookie (only a hash of the secret is stored). Turning the link off or regenerating it locks guests out. Family members following the link are treated as family.
+- **Rules:** anyone who joined can add/edit/tick items and comment; guests claim only for themselves and release only their own claims, family can assign anyone; items/comments are deleted by their author or family.
+- Server: `lib/shared-menus.js` (tables `shared_menus`, `shared_menu_participants`, `shared_menu_items`, `shared_menu_comments`; all in the event log). One router serves both URL prefixes. Live updates: per-menu SSE at `.../stream` (`menu:changed`), plus family SSE `shared-menus:changed`.
+- Client: `static/tracker/components/ps-shared-menu.js` is self-contained (no core.js) so the guest page can use it; guest text is rendered inside the family app, so everything is escaped.
+- Tests: `tests/shared-menus.test.js`.

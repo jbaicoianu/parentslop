@@ -8,6 +8,7 @@ const rateLimit = require("express-rate-limit");
 const { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const eventLog = require("./lib/event-log");
 const projectsModule = require("./lib/projects");
+const sharedMenusModule = require("./lib/shared-menus");
 const { initFieldVersionsTable, buildFields, updateFieldVersions, clearFieldVersions, applyEvent, EVENT_TABLES, PK_COL, BALANCE_TABLES } = require("./lib/apply-event");
 
 const CRSQLITE_EXT = path.join(__dirname, "node_modules/@vlcn.io/crsqlite/dist/crsqlite");
@@ -424,6 +425,9 @@ function initDb() {
   // Projects module tables (CRRs)
   projectsModule.initProjectsSchema(db);
 
+  // Shared menus (potluck checklists shared by link)
+  sharedMenusModule.initSharedMenusSchema(db);
+
   // --- Event log: field_versions table (LWW version tracking) ---
   initFieldVersionsTable(db);
 }
@@ -479,6 +483,7 @@ const FAMILY_SNAPSHOT_TABLES = [
   "completions", "redemptions", "balance_adjustments", "job_claims", "worklog_entries",
   "meal_options", "meal_votes", "meal_plan", "meal_log",
   "project_tracks", "projects", "project_members", "project_tasks", "project_picks",
+  "shared_menus", "shared_menu_participants", "shared_menu_items", "shared_menu_comments",
   "user_balances", "field_versions",
 ];
 
@@ -2687,6 +2692,17 @@ app.delete("/api/meal-log/:id", requireFamilyAuth, async (req, res) => {
 
 // --- Projects module (admin-only personal backlog) -----------------------------
 projectsModule.registerProjects({ app, db: { prepare: (...a) => db.prepare(...a), transaction: (fn) => db.transaction(fn) }, emitEvent, broadcastSSE, requireFamilyAuth, requireAdmin });
+
+// --- Shared menus (family + guests via secret link) -----------------------------
+sharedMenusModule.registerSharedMenus({ app, db: { prepare: (...a) => db.prepare(...a), transaction: (fn) => db.transaction(fn) }, emitEvent, broadcastSSE, requireFamilyAuth, getSession, rateLimit });
+
+// The page guests open from a shared link. The token stays out of Referer headers and search engines.
+app.get("/m/:token", (req, res) => {
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "static", "shared-menu.html"));
+});
 
 const SYNC_SECRET = process.env.SYNC_SECRET || null;
 const SYNC_PEERS = (process.env.SYNC_PEERS || "").split(",").map(s => s.trim()).filter(Boolean);

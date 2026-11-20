@@ -14,6 +14,7 @@ const suites = [
   "tests/event-log.test.js",
   "tests/projects.test.js",
   "tests/members.test.js",
+  "tests/shared-menus.test.js",
 ];
 
 let anyFailed = false;
