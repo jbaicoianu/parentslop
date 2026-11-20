@@ -397,6 +397,9 @@
           <!-- Meals -->
           <ps-meals id="view-meals"></ps-meals>
 
+          <!-- Screen time (allowances enforced on the family computer) -->
+          <ps-screentime id="view-screentime"></ps-screentime>
+
           <!-- Projects (parents' backlog) -->
           <ps-projects id="view-projects"></ps-projects>
 
@@ -514,6 +517,7 @@
   <script src="/tracker/components/ps-meals.js"></script>
   <script src="/tracker/projects-score.js"></script>
   <script src="/tracker/components/ps-projects.js"></script>
+  <script src="/tracker/components/ps-screentime.js"></script>
   <script src="/tracker/components/ps-admin-modules.js"></script>
   <script src="/tracker/components/ps-feedback-fab.js"></script>
 
@@ -946,7 +950,7 @@
       }
 
       // ---- Hash-based routing ----
-      const VALID_VIEWS = ['dashboard', 'tasks', 'shop', 'history', 'meals', 'games', 'projects', 'admin'];
+      const VALID_VIEWS = ['dashboard', 'tasks', 'shop', 'history', 'meals', 'games', 'screentime', 'projects', 'admin'];
 
       function parseHash() {
         const hash = location.hash.replace(/^#/, '');

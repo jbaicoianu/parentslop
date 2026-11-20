@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""ParentSlop screen time agent for a Linux family computer (GNOME/GDM, xrdp, console).
+
+Runs as root (systemd unit parentslop-screentime.service):
+
+  * Every few seconds it asks logind who is logged in. A kid's time counts while one of their sessions is
+    in front (Active), unlocked and not idle (GNOME holds off idle while a video plays).
+  * It reports each kid's running total for today to ParentSlop and gets back how much time they have
+    left (allowance + parent bonus - time used on every computer).
+  * As the end gets close it shows desktop notifications (thresholds come from the server, e.g. 15/5/1
+    minutes). At zero it starts a grace countdown (e.g. 2 minutes) and then logs the kid out
+    (loginctl terminate-user).
+  * It writes the result to a state file that the PAM check (`pam-check`, run by pam_exec) reads to stop
+    a kid with no time left from logging back in.
+  * Offline it keeps counting locally and enforces from the last numbers it got (or the plain weekday/
+    weekend allowance after midnight), then catches the server up when it's back.
+
+Only accounts in the local group "screentime" are ever counted or logged out, and the server has to map
+the login to a person with screen time turned on. Everyone else is left alone.
+
+Usage:
+  parentslop-screentime run                 the daemon
+  parentslop-screentime pam-check           for pam_exec (PAM_USER from the environment); exit 1 = deny
+  parentslop-screentime status              what the daemon last decided
+  parentslop-screentime sessions            what logind reports right now
+  parentslop-screentime test-notify LOGIN   send LOGIN a test notification
+
+Config: /etc/parentslop-screentime.conf (key = value): server, token, group, tick, report_every,
+count_idle, offline (enforce | open).
+"""
+
+import datetime
+import grp
+import json
+import os
+import pwd
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+VERSION = "1"
+CONF_PATH = os.environ.get("PARENTSLOP_SCREENTIME_CONF", "/etc/parentslop-screentime.conf")
+STATE_PATH = os.environ.get("PARENTSLOP_SCREENTIME_STATE", "/var/lib/parentslop-screentime/state.json")
+DEFAULT_CONF = {
+    "server": "https://parentslop.com",
+    "token": "",
+    "group": "screentime",
+    "tick": 5,              # seconds between session checks
+    "report_every": 60,     # seconds between server reports (sooner when someone logs in or out)
+    "count_idle": False,    # count time while the session is idle
+    "offline": "enforce",   # enforce: keep enforcing from cached numbers; open: stop enforcing after 15 min offline
+}
+OPEN_AFTER_OFFLINE = 15 * 60
+RELOGIN_NOTICE = 30         # seconds of warning for someone who gets back in after being logged out
+COUNTDOWN_EVERY = 30        # refresh the grace countdown notification this often
+NO_TIME_MESSAGE = "No screen time left today. Ask a parent if you need more."
+
+
+def log(*args):
+    print(*args, flush=True)
+
+
+def load_conf(path=CONF_PATH):
+    conf = dict(DEFAULT_CONF)
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = (x.strip() for x in line.split("=", 1))
+                if k in ("tick", "report_every"):
+                    conf[k] = max(1, int(v))
+                elif k == "count_idle":
+                    conf[k] = v.lower() in ("1", "yes", "true", "on")
+                else:
+                    conf[k] = v
+    except FileNotFoundError:
+        pass
+    conf["server"] = conf["server"].rstrip("/")
+    return conf
+
+
+def fmt_duration(seconds):
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s} second{'s' if s != 1 else ''}"
+    m = (s + 30) // 60
+    h, m = divmod(m, 60)
+    parts = []
+    if h:
+        parts.append(f"{h} hour{'s' if h != 1 else ''}")
+    if m:
+        parts.append(f"{m} minute{'s' if m != 1 else ''}")
+    return " ".join(parts)
+
+
+def fmt_clock(seconds):
+    s = max(0, int(round(seconds)))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+# --- The machine: logind, notifications, logging out ---------------------------------------------------
+
+class Session:
+    def __init__(self, props):
+        self.id = props.get("Id", "")
+        self.login = props.get("Name", "")
+        self.uid = int(props.get("User") or -1)
+        self.active = props.get("Active") == "yes"
+        self.locked = props.get("LockedHint") == "yes"
+        self.idle = props.get("IdleHint") == "yes"
+        self.cls = props.get("Class", "")
+        self.type = props.get("Type", "")
+        self.remote = props.get("Remote") == "yes"
+        self.state = props.get("State", "")
+
+    def on_screen(self, count_idle=False):
+        """Is this session being used right now?"""
+        return (self.cls == "user" and self.state != "closing" and self.active and not self.locked
+                and (count_idle or not self.idle))
+
+    def __repr__(self):
+        return (f"<{self.id} {self.login} {self.type}{' remote' if self.remote else ''} state={self.state} "
+                f"active={self.active} locked={self.locked} idle={self.idle}>")
+
+
+class System:
+    PROPS = ["Id", "Name", "User", "Active", "LockedHint", "IdleHint", "Class", "Type", "Remote", "State"]
+
+    def sessions(self):
+        out = subprocess.run(["loginctl", "list-sessions", "--no-legend", "--no-pager"],
+                             capture_output=True, text=True, timeout=10, check=True).stdout
+        ids = [line.split()[0] for line in out.splitlines() if line.strip()]
+        if not ids:
+            return []
+        args = ["loginctl", "show-session", "--no-pager"] + ids
+        for p in self.PROPS:
+            args += ["-p", p]
+        # A session can disappear between the two calls; loginctl then fails for it but prints the rest.
+        out = subprocess.run(args, capture_output=True, text=True, timeout=10).stdout
+        sessions, props = [], {}
+        for line in out.splitlines() + [""]:
+            if not line.strip():
+                if props:
+                    sessions.append(Session(props))
+                props = {}
+                continue
+            k, _, v = line.partition("=")
+            props[k] = v
+        return sessions
+
+    def group_members(self, name):
+        try:
+            g = grp.getgrnam(name)
+        except KeyError:
+            return set()
+        members = set(g.gr_mem)
+        for p in pwd.getpwall():
+            if p.pw_gid == g.gr_gid:
+                members.add(p.pw_name)
+        # Never manage root or system accounts, whatever the group says.
+        return {m for m in members if self._uid(m) >= 1000}
+
+    def _uid(self, login):
+        try:
+            return pwd.getpwnam(login).pw_uid
+        except KeyError:
+            return -1
+
+    def notify(self, login, title, body, urgency="normal", replace_id=None):
+        """Show a desktop notification in LOGIN's session(s). Returns the notification id (to replace it)."""
+        uid = self._uid(login)
+        bus = f"/run/user/{uid}/bus"
+        if uid < 1000 or not os.path.exists(bus):
+            return None
+        cmd = ["runuser", "-u", login, "--", "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
+               "notify-send", "--app-name=Screen Time", f"--urgency={urgency}", "--icon=alarm-symbolic",
+               "--print-id"]
+        if replace_id:
+            cmd.append(f"--replace-id={replace_id}")
+        cmd += [title, body]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                log(f"notify {login} failed: {r.stderr.strip()}")
+                return None
+            return int(r.stdout.strip() or 0) or None
+        except (subprocess.SubprocessError, ValueError, OSError) as e:
+            log(f"notify {login} failed: {e}")
+            return None
+
+    def terminate(self, login):
+        log(f"logging out {login}")
+        subprocess.run(["loginctl", "terminate-user", login], timeout=20)
+
+
+class Api:
+    def __init__(self, conf):
+        self.url = conf["server"] + "/api/screentime/device/report"
+        self.token = conf["token"]
+
+    def report(self, body):
+        req = urllib.request.Request(self.url, data=json.dumps(body).encode(), method="POST", headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": f"parentslop-screentime/{VERSION}",
+        })
+        with urllib.request.urlopen(req, timeout=15) as res:
+            return json.loads(res.read().decode())
+
+
+# --- State ---------------------------------------------------------------------------------------------
+
+def empty_state(date):
+    return {
+        "date": date,
+        "used": {},        # login -> seconds counted on this computer today
+        "server": {},      # login -> last numbers from the server (see Agent._apply_report)
+        "synced_at": 0,    # wall clock of the last good report
+        "warned": {},      # login -> warning thresholds (minutes) already shown today
+        "grace_ends": {},  # login -> wall clock when the grace period ends
+        "logged_out": {},  # login -> wall clock we last logged them out
+        "kick_at": {},     # login -> wall clock to log out someone who got back in
+        "notify_id": {},   # login -> id of our notification on screen (to replace it)
+        "countdown_at": {},  # login -> when the grace countdown was last refreshed
+        "blocked": {},     # login -> True when they have no time left (the PAM check reads this)
+        "states": {},      # login -> ok | warning | grace | blocked | offline (shown to parents)
+        "remaining": {},   # login -> seconds left as of updated_at
+        "updated_at": 0,
+    }
+
+
+def load_state(path=STATE_PATH):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_state(state, path=STATE_PATH):
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o755, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1, sort_keys=True)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+# --- The agent -------------------------------------------------------------------------------------------
+
+class Agent:
+    def __init__(self, conf, system, api, clock=time.time, today=None, state_path=STATE_PATH):
+        self.conf = conf
+        self.sys = system
+        self.api = api
+        self.clock = clock
+        self.today = today or (lambda: datetime.date.today().isoformat())
+        self.state_path = state_path
+        st = load_state(state_path)
+        self.state = st if st and st.get("date") == self.today() else self._new_day(st)
+        self.last_report = 0
+        self.last_tick = None
+        self.last_present = None
+        self.dirty = True
+
+    def _new_day(self, old):
+        st = empty_state(self.today())
+        if old:
+            st["server"] = old.get("server", {})  # yesterday's settings, for offline fallback
+            st["synced_at"] = old.get("synced_at", 0)
+        return st
+
+    # --- numbers ---
+
+    def managed(self):
+        """Logins we enforce: in the local group and known to the server."""
+        return sorted(self.sys.group_members(self.conf["group"]) & set(self.state["server"]))
+
+    def offline_for(self):
+        return self.clock() - (self.state["synced_at"] or 0)
+
+    def remaining(self, login):
+        """Seconds left today, or None if we shouldn't enforce for this login."""
+        info = self.state["server"].get(login)
+        if not info:
+            return None
+        if self.conf["offline"] == "open" and self.offline_for() > OPEN_AFTER_OFFLINE:
+            return None
+        used = self.state["used"].get(login, 0)
+        if info.get("date") == self.state["date"]:
+            if info.get("remaining") is None:
+                return None
+            return info["remaining"] - (used - info.get("at_used", 0))
+        # Haven't heard from the server today: plain allowance minus what we counted here.
+        weekend = datetime.date.fromisoformat(self.state["date"]).weekday() >= 5
+        minutes = info.get("weekend") if weekend else info.get("weekday")
+        return None if minutes is None else minutes * 60 - used
+
+    # --- report ---
+
+    def report(self, present):
+        st = self.state
+        body = {
+            "date": st["date"],
+            "usage": {login: int(s) for login, s in st["used"].items() if s >= 1},
+            "active": sorted(present),
+            "states": st["states"],
+            "graceEndsAt": {l: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat()
+                            for l, t in st["grace_ends"].items() if t > self.clock()},
+            "hostname": socket.gethostname(),
+            "agent": VERSION,
+        }
+        try:
+            res = self.api.report(body)
+        except urllib.error.HTTPError as e:
+            log(f"report failed: HTTP {e.code} {e.read()[:200]!r}")
+            return False
+        except Exception as e:  # offline, DNS, timeout...
+            log(f"report failed: {e}")
+            return False
+        self._apply_report(res)
+        return True
+
+    def _apply_report(self, res):
+        st = self.state
+        server = {}
+        for m in res.get("members", []):
+            login = m.get("login")
+            if not login:
+                continue
+            if res.get("date") == st["date"]:
+                # The server may know more of this computer's time than we do (e.g. state file lost).
+                if (m.get("deviceSeconds") or 0) > st["used"].get(login, 0):
+                    st["used"][login] = m["deviceSeconds"]
+            server[login] = {
+                "date": res.get("date"),
+                "remaining": m.get("remainingSeconds"),
+                "at_used": st["used"].get(login, 0),
+                "weekday": m.get("weekdayMinutes"),
+                "weekend": m.get("weekendMinutes"),
+                "warn": m.get("warnMinutes") or [],
+                "grace": m.get("graceMinutes", 2),
+                "name": m.get("name", ""),
+            }
+        st["server"] = server
+        st["synced_at"] = self.clock()
+        self.dirty = True
+
+    # --- the loop ---
+
+    def tick(self):
+        now = self.clock()
+        if self.today() != self.state["date"]:
+            log(f"new day {self.today()}")
+            self.state = self._new_day(self.state)
+            self.last_report = 0
+        dt = 0 if self.last_tick is None else max(0, min(now - self.last_tick, self.conf["tick"] * 3))
+        self.last_tick = now
+
+        try:
+            sessions = self.sys.sessions()
+        except Exception as e:
+            log(f"can't list sessions: {e}")
+            return
+        group = self.sys.group_members(self.conf["group"])
+        by_login = {}
+        for s in sessions:
+            if s.login in group and s.cls == "user":
+                by_login.setdefault(s.login, []).append(s)
+
+        # Count time for everyone in the group (even before the server has told us about them).
+        for login, ss in by_login.items():
+            if dt and any(s.on_screen(self.conf["count_idle"]) for s in ss):
+                self.state["used"][login] = self.state["used"].get(login, 0) + dt
+                self.dirty = True
+
+        present = set(by_login)
+        if now - self.last_report >= self.conf["report_every"] or present != self.last_present:
+            self.last_report = now
+            self.report(present)
+        self.last_present = present
+
+        for login in self.managed():
+            self.enforce(login, by_login.get(login, []), now)
+        for login in set(self.state["blocked"]) - set(self.managed()):
+            self.state["blocked"].pop(login, None)  # no longer managed: let them in
+            self.state["states"].pop(login, None)
+
+        self.state["updated_at"] = now
+        if self.dirty or int(now) % 30 < self.conf["tick"]:
+            save_state(self.state, self.state_path)
+            self.dirty = False
+
+    def _set(self, key, login, value):
+        if value is None:
+            if login in self.state[key]:
+                self.state[key].pop(login)
+                self.dirty = True
+        elif self.state[key].get(login) != value:
+            self.state[key][login] = value
+            self.dirty = True
+
+    def _notify(self, login, title, body, urgency="normal", replace=False):
+        rid = self.state["notify_id"].get(login) if replace else None
+        nid = self.sys.notify(login, title, body, urgency, rid)
+        if nid:
+            self._set("notify_id", login, nid)
+
+    def enforce(self, login, sessions, now):
+        st = self.state
+        info = st["server"][login]
+        rem = self.remaining(login)
+        if rem is not None:
+            self._set("remaining", login, int(rem))
+        if rem is None:
+            self._set("blocked", login, None)
+            self._set("states", login, "offline" if info else None)
+            return
+        logged_in = bool(sessions)
+        offline = self.offline_for() > 2 * self.conf["report_every"] + 30
+
+        if rem > 0:
+            self._set("blocked", login, None)
+            if st["grace_ends"].get(login) or st["kick_at"].get(login):
+                # A parent added time while the clock was running out.
+                self._set("grace_ends", login, None)
+                self._set("kick_at", login, None)
+                self._set("logged_out", login, None)
+                if logged_in:
+                    self._notify(login, "More screen time!", f"You have {fmt_duration(rem)} left today.", "normal", replace=True)
+            thresholds = sorted(info.get("warn") or [], reverse=True)
+            crossed = [w for w in thresholds if rem <= w * 60]
+            warned = [w for w in st["warned"].get(login, []) if w in crossed]  # re-arm if time was added
+            new = [w for w in crossed if w not in warned]
+            if new and logged_in:
+                urgent = min(new) <= 5
+                self._notify(login, "Screen time is almost up" if urgent else "Screen time check",
+                             f"You have {fmt_duration(rem)} of screen time left today."
+                             + (" Start wrapping up and save your work." if urgent else ""),
+                             "critical" if urgent else "normal", replace=True)
+                warned = crossed
+            self._set("warned", login, sorted(warned, reverse=True) or None)
+            self._set("states", login, "offline" if offline else ("warning" if crossed else "ok"))
+            return
+
+        # Out of time.
+        self._set("blocked", login, True)
+        grace_ends = st["grace_ends"].get(login)
+        if not logged_in:
+            self._set("states", login, "blocked")
+            self._set("kick_at", login, None)
+            if grace_ends is not None and now >= grace_ends and not st["logged_out"].get(login):
+                self._set("logged_out", login, grace_ends)  # they logged off by themselves during the grace period
+            return
+        if grace_ends is None:
+            grace = max(0, int(info.get("grace", 2) * 60))
+            grace_ends = now + grace
+            self._set("grace_ends", login, grace_ends)
+            self._set("countdown_at", login, now)
+            if grace:
+                self._notify(login, "Screen time is up!",
+                             f"Save your work now. You'll be logged out in {fmt_duration(grace)}.", "critical", replace=True)
+        if now < grace_ends:
+            self._set("states", login, "grace")
+            if now - st["countdown_at"].get(login, 0) >= COUNTDOWN_EVERY:
+                self._set("countdown_at", login, now)
+                self._notify(login, "Screen time is up!",
+                             f"Save your work now. Logging out in {fmt_clock(grace_ends - now)}.", "critical", replace=True)
+            return
+        if not st["logged_out"].get(login):
+            # Grace is over.
+            self._logout(login, now)
+            return
+        # They got back in after being logged out (e.g. the PAM check isn't installed for that login path).
+        kick_at = st["kick_at"].get(login)
+        if kick_at is None:
+            self._set("kick_at", login, now + RELOGIN_NOTICE)
+            self._set("states", login, "grace")
+            self._notify(login, "No screen time left", f"{NO_TIME_MESSAGE} Logging out in {RELOGIN_NOTICE} seconds.", "critical")
+        elif now >= kick_at:
+            self._logout(login, now)
+
+    def _logout(self, login, now):
+        self.sys.terminate(login)
+        self._set("logged_out", login, now)
+        self._set("kick_at", login, None)
+        self._set("notify_id", login, None)
+        self._set("states", login, "blocked")
+
+    def run(self):
+        stop = []
+        signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+        signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+        log(f"parentslop-screentime {VERSION}: server {self.conf['server']}, group {self.conf['group']!r}, "
+            f"managing {sorted(self.sys.group_members(self.conf['group'])) or 'nobody yet'}")
+        while not stop:
+            try:
+                self.tick()
+            except Exception as e:  # keep going no matter what
+                log(f"tick failed: {e!r}")
+            for _ in range(int(self.conf["tick"] * 10)):
+                if stop:
+                    break
+                time.sleep(0.1)
+        save_state(self.state, self.state_path)
+        log("stopped")
+
+
+# --- PAM check ---------------------------------------------------------------------------------------------
+
+def pam_check(state_path=STATE_PATH, env=os.environ, today=None):
+    """Exit code for pam_exec: 1 denies the login. Anything unexpected lets them in (the daemon still enforces)."""
+    try:
+        if env.get("PAM_TYPE", "account") != "account":
+            return 0
+        user = env.get("PAM_USER", "")
+        st = load_state(state_path)
+        if not user or not st or st.get("date") != (today or datetime.date.today().isoformat()):
+            return 0
+        if st.get("blocked", {}).get(user):
+            print(NO_TIME_MESSAGE)
+            return 1
+    except Exception:
+        return 0
+    return 0
+
+
+# --- main ----------------------------------------------------------------------------------------------------
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "help"
+    if cmd == "pam-check":
+        return pam_check()
+    if cmd == "sessions":
+        for s in System().sessions():
+            print(s, "-> counts" if s.on_screen(load_conf()["count_idle"]) else "")
+        return 0
+    if cmd == "status":
+        conf = load_conf()
+        st = load_state()
+        print(f"server: {conf['server']}  token: {'set' if conf['token'] else 'MISSING'}  group: {conf['group']} "
+              f"{sorted(System().group_members(conf['group']))}")
+        if not st:
+            print("no state yet (is the service running?  systemctl status parentslop-screentime)")
+            return 0
+        ago = time.time() - (st.get("synced_at") or 0)
+        print(f"day {st['date']}, last synced {fmt_duration(ago)} ago" if st.get("synced_at") else f"day {st['date']}, never synced")
+        for login in sorted(set(st.get("server", {})) | set(st.get("used", {}))):
+            info = st.get("server", {}).get(login, {})
+            rem = st.get("remaining", {}).get(login)
+            print(f"  {login:12} {info.get('name', '?'):12} used here {fmt_duration(st['used'].get(login, 0)):>18}  "
+                  f"left {fmt_duration(rem) if rem is not None else '-':>18}  {st.get('states', {}).get(login, 'unmanaged')}"
+                  f"{'  BLOCKED' if st.get('blocked', {}).get(login) else ''}")
+        return 0
+    if cmd == "test-notify" and len(argv) > 2:
+        nid = System().notify(argv[2], "Screen time test", "Notifications from ParentSlop are working.", "normal")
+        print("sent" if nid else "failed (is that user logged in to a desktop?)")
+        return 0 if nid else 1
+    if cmd == "run":
+        conf = load_conf()
+        if not conf["token"]:
+            log(f"no token in {CONF_PATH}; add one from ParentSlop > Screen Time > Computers")
+            return 1
+        if os.geteuid() != 0:
+            log("must run as root")
+            return 1
+        Agent(conf, System(), Api(conf)).run()
+        return 0
+    print(__doc__)
+    return 0 if cmd in ("help", "-h", "--help") else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

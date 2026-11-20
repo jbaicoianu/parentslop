@@ -9,6 +9,7 @@ const { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, Dele
 const eventLog = require("./lib/event-log");
 const projectsModule = require("./lib/projects");
 const sharedMenusModule = require("./lib/shared-menus");
+const screentimeModule = require("./lib/screentime");
 const { initFieldVersionsTable, buildFields, updateFieldVersions, clearFieldVersions, applyEvent, EVENT_TABLES, PK_COL, BALANCE_TABLES } = require("./lib/apply-event");
 
 const CRSQLITE_EXT = path.join(__dirname, "node_modules/@vlcn.io/crsqlite/dist/crsqlite");
@@ -428,6 +429,9 @@ function initDb() {
   // Shared menus (potluck checklists shared by link)
   sharedMenusModule.initSharedMenusSchema(db);
 
+  // Screen time (daily allowances enforced by the agent on the family computer)
+  screentimeModule.initScreentimeSchema(db);
+
   // --- Event log: field_versions table (LWW version tracking) ---
   initFieldVersionsTable(db);
 }
@@ -484,6 +488,7 @@ const FAMILY_SNAPSHOT_TABLES = [
   "meal_options", "meal_votes", "meal_plan", "meal_log",
   "project_tracks", "projects", "project_members", "project_tasks", "project_picks",
   "shared_menus", "shared_menu_participants", "shared_menu_items", "shared_menu_comments", "shared_menu_claims",
+  "screentime_settings", "screentime_usage", "screentime_adjustments", "screentime_devices",
   "user_balances", "field_versions",
 ];
 
@@ -2695,6 +2700,9 @@ projectsModule.registerProjects({ app, db: { prepare: (...a) => db.prepare(...a)
 
 // --- Shared menus (family + guests via secret link) -----------------------------
 sharedMenusModule.registerSharedMenus({ app, db: { prepare: (...a) => db.prepare(...a), transaction: (fn) => db.transaction(fn) }, emitEvent, broadcastSSE, requireFamilyAuth, getSession, rateLimit });
+
+// --- Screen time (allowances enforced by the agent on the family computer) -------
+screentimeModule.registerScreentime({ app, db: { prepare: (...a) => db.prepare(...a), transaction: (fn) => db.transaction(fn) }, emitEvent, broadcastSSE, requireFamilyAuth, requireAdmin, rateLimit });
 
 // The page guests open from a shared link. The token stays out of Referer headers and search engines.
 app.get("/m/:token", (req, res) => {

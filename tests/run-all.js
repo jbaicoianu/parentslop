@@ -15,6 +15,7 @@ const suites = [
   "tests/projects.test.js",
   "tests/members.test.js",
   "tests/shared-menus.test.js",
+  "tests/screentime.test.js",
 ];
 
 let anyFailed = false;

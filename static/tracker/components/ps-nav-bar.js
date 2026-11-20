@@ -115,6 +115,7 @@ class PsNavBar extends HTMLElement {
       { id: "history", label: "History", icon: "\u231A" },
       { id: "meals", label: "Meals", icon: "\uD83C\uDF7D", module: "meals" },
       { id: "games", label: "Games", icon: "\u25B6", module: "games" },
+      { id: "screentime", label: "Screen Time", icon: "\u23F3", module: "screentime" },
     ];
     if (isAdmin) {
       tabs.push({ id: "projects", label: "Projects", icon: "\u25A6", module: "projects" });

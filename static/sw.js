@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'parentslop-v18';
+const CACHE_VERSION = 'parentslop-v19';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -26,6 +26,7 @@ const STATIC_ASSETS = [
   '/tracker/components/ps-feedback-fab.js',
   '/tracker/projects-score.js',
   '/tracker/components/ps-projects.js',
+  '/tracker/components/ps-screentime.js',
 ];
 
 // Pre-cache static assets on install

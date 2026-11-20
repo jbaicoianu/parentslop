@@ -1289,6 +1289,10 @@ function _connectSSE() {
     _sseSource.addEventListener("shared-menus:changed", () => {
       bus.emit("shared-menus:changed");
     });
+
+    _sseSource.addEventListener("screentime:changed", () => {
+      bus.emit("screentime:changed");
+    });
   } catch (e) {
     console.warn("SSE connection failed:", e);
     setTimeout(() => _connectSSE(), 5000);

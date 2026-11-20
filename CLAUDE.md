@@ -59,3 +59,13 @@ Potluck-style menu checklists (Thanksgiving dinner...) planned with people outsi
 - Server: `lib/shared-menus.js` (tables `shared_menus`, `shared_menu_participants`, `shared_menu_items`, `shared_menu_comments`; all in the event log). One router serves both URL prefixes. Live updates: per-menu SSE at `.../stream` (`menu:changed`), plus family SSE `shared-menus:changed`.
 - Client: `static/tracker/components/ps-shared-menu.js` is self-contained (no core.js) so the guest page can use it; guest text is rendered inside the family app, so everything is escaped.
 - Tests: `tests/shared-menus.test.js`.
+
+## Screen time
+
+Daily computer time per kid, enforced on the family computer ("kidputer", Ubuntu/GNOME). Module id `screentime`, nav tab "Screen Time" (kids see their own time, parents manage everyone).
+
+- **Model:** per person (`screentime_settings`, id = users.id): on/off, weekday/weekend minutes, the Linux login that maps to them, warning thresholds, grace minutes. Usage is one row per (person, day, computer) holding that computer's running total for the day; the server keeps `max(stored, reported)` so reports are idempotent and offline catch-up just works. Parents add/remove time per day (`screentime_adjustments`). remaining = allowance + adjustments - usage over all computers. Days are the computer's local date; Sat/Sun use the weekend allowance.
+- **Computers:** `screentime_devices`, bearer token `psd_<id>.<secret>` (only a hash stored), created in the UI (token shown once with an install command). `POST /api/screentime/device/report` is the only device endpoint: it takes `{date, usage:{login:seconds}, active, states, graceEndsAt}` and returns each managed login's remaining time + settings. Who is on which computer right now is kept in memory only.
+- **Agent:** `tools/screentime-agent/` (Python 3 stdlib, no build). `parentslop-screentime run` is a root systemd service: polls logind every 5 s (time counts while a session is Active, unlocked and not idle), reports every 60 s, notifies via `notify-send` in the kid's session, starts the grace countdown at zero, then `loginctl terminate-user`. `pam-check` (pam_exec, after `@include common-account` in gdm-*/xrdp-sesman/login/sshd, guarded by `pam_succeed_if ... notingroup screentime`) blocks kids with no time left. Only accounts in the local `screentime` group are ever touched. `install.sh` installs/uninstalls; the server serves the three install files at `/screentime-agent/<file>`.
+- Server: `lib/screentime.js`. Client: `static/tracker/components/ps-screentime.js`. SSE: `screentime:changed`.
+- Tests: `tests/screentime.test.js` (server), `python3 tools/screentime-agent/test_agent.py` (agent logic with fake logind/server).

@@ -1,0 +1,14 @@
+[Unit]
+Description=ParentSlop screen time (counts kids' computer time, warns, logs out when it runs out)
+After=network-online.target systemd-logind.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/sbin/parentslop-screentime run
+Restart=always
+RestartSec=5
+# Allow a graceful state save on stop.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
