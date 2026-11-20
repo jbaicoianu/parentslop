@@ -75,16 +75,15 @@
   const STYLES = `
     :host {
       display: block;
-      --card: #16141f; --card-2: #1e1b2a; --line: #2c2838; --text: #f4f1ea; --muted: #a8a2b4; --faint: #6f6a7c;
-      --warm: #f59e0b; --warm-2: #fb923c; --warm-soft: rgba(245, 158, 11, 0.14); --good: #4ade80; --danger: #f87171;
+      --text: #f4f1ea; --muted: #a8a2b4; --faint: #6f6a7c; --hair: rgba(255, 255, 255, 0.07);
+      --warm: #f59e0b; --warm-2: #fb923c; --warm-text: #ffc46b; --good: #4ade80; --danger: #f87171; --field: rgba(255, 255, 255, 0.05);
       color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.35;
     }
     * { box-sizing: border-box; }
     button, input, select, textarea { font: inherit; color: inherit; }
-    .wrap { display: flex; flex-direction: column; gap: 16px; }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 16px; }
-    h2 { margin: 0 0 4px; font-size: 1.05rem; }
-    .hint { margin: 0 0 12px; color: var(--muted); font-size: 0.88rem; }
+    .wrap { display: flex; flex-direction: column; gap: 26px; }
+    h2 { margin: 0 0 4px; font-size: 1.1rem; }
+    .hint { margin: 0 0 12px; color: var(--muted); font-size: 0.9rem; }
 
     /* Banner */
     .hero { position: relative; overflow: hidden; border-radius: 24px; padding: 22px 20px 20px; color: #fff8ee;
@@ -92,20 +91,29 @@
                         linear-gradient(140deg, #7c2d12 0%, #b45309 55%, #d97706 100%); }
     .hero-emoji { font-size: 2.6rem; line-height: 1; margin-bottom: 8px; }
     .hero h1 { margin: 0; font-size: 1.7rem; line-height: 1.15; letter-spacing: -0.01em; overflow-wrap: anywhere; }
-    .hero-when { margin-top: 6px; font-size: 0.95rem; opacity: 0.92; }
-    .pill { display: inline-block; margin-top: 10px; padding: 4px 12px; border-radius: 999px; background: rgba(0,0,0,0.22);
-            font-weight: 700; font-size: 0.85rem; }
+    .hero-when { margin-top: 6px; font-size: 0.95rem; opacity: 0.95; }
+    .hero-when b { font-weight: 700; }
     .hero-notes { margin: 12px 0 0; white-space: pre-wrap; font-size: 0.95rem; overflow-wrap: anywhere; }
-    .hero-people { margin-top: 14px; display: flex; align-items: center; gap: 10px; font-size: 0.85rem; }
+    .hero-people { margin-top: 14px; display: flex; align-items: center; gap: 10px; font-size: 0.88rem; }
     .stack { display: flex; }
     .stack .avatar { margin-left: -6px; box-shadow: 0 0 0 2px #b45309; }
     .stack .avatar:first-child { margin-left: 0; }
-    .hero-links { margin-top: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
-    .hero .link { color: #ffe7c2; text-decoration: underline; text-underline-offset: 3px; }
+    .hero-actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .hero-btn { appearance: none; border: none; border-radius: 999px; padding: 10px 18px; font-weight: 700; font-size: 0.95rem;
+                cursor: pointer; background: #fff8ee; color: #7c2d12; }
+    .hero-btn:hover { background: #ffffff; }
+    .hero-btn.ghost { background: rgba(0,0,0,0.2); color: #fff8ee; }
+    .hero-off { margin-top: 14px; font-size: 0.9rem; display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+    .hero-links { margin-top: 14px; display: flex; gap: 6px 18px; flex-wrap: wrap; }
+    .hero .link { color: #ffe7c2; text-decoration: underline; text-underline-offset: 3px; font-weight: 600; }
+    .hero-opts { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.2); display: flex; flex-direction: column;
+                 gap: 8px; font-size: 0.85rem; }
+    .hero-opts .opt { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .hero input[type=text], .hero input[type=date], .hero textarea { background: rgba(0,0,0,0.28); border-color: rgba(255,255,255,0.25); color: #fff8ee; }
+    .hero input::placeholder, .hero textarea::placeholder { color: rgba(255,248,238,0.6); }
+    .hero .btn { background: rgba(0,0,0,0.25); border-color: rgba(255,255,255,0.3); color: #fff8ee; }
+    .hero .btn-warm { background: #fff8ee; color: #7c2d12; }
     .rename { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-    .rename input[type=text] { background: rgba(0,0,0,0.28); border-color: rgba(255,255,255,0.25); color: #fff8ee; }
-    .rename input[type=text]::placeholder { color: rgba(255,248,238,0.6); }
-    .rename .btn { background: rgba(0,0,0,0.25); border-color: rgba(255,255,255,0.3); color: #fff8ee; }
     .rename-hint { font-size: 0.82rem; opacity: 0.9; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
 
     .avatar { width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--c); color: #1a1208; display: inline-flex;
@@ -113,17 +121,15 @@
     .avatar.sm { width: 22px; height: 22px; font-size: 0.68rem; }
 
     /* Buttons & fields */
-    .btn { appearance: none; border: 1px solid var(--line); background: var(--card-2); border-radius: 14px; padding: 11px 18px;
-           font-size: 0.95rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
-    .btn:hover { border-color: #443e55; }
+    .btn { appearance: none; border: 1px solid var(--hair); background: var(--field); border-radius: 12px; padding: 10px 16px;
+           font-size: 0.92rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
+    .btn:hover { background: rgba(255,255,255,0.09); }
     .btn-warm { background: linear-gradient(135deg, var(--warm), var(--warm-2)); border: none; color: #2a1605; }
-    .btn-warm:hover { filter: brightness(1.06); }
-    .btn-big { width: 100%; padding: 14px; font-size: 1rem; }
-    .link { appearance: none; background: none; border: none; padding: 0; color: var(--warm); cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+    .link { appearance: none; background: none; border: none; padding: 0; color: var(--warm-text); cursor: pointer; font-size: 0.85rem; font-weight: 600; }
     .link.quiet { color: var(--muted); font-weight: 500; }
-    .link.danger { color: var(--danger); }
+    .link.danger { color: var(--danger); font-weight: 500; }
     input[type=text], input[type=date], select, textarea {
-      width: 100%; background: #0f0d16; border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; font-size: 1rem; min-width: 0;
+      width: 100%; background: var(--field); border: 1px solid var(--hair); border-radius: 12px; padding: 11px 13px; font-size: 1rem; min-width: 0;
     }
     input:focus, select:focus, textarea:focus { outline: none; border-color: var(--warm); }
     textarea { resize: vertical; }
@@ -132,63 +138,67 @@
     .stack-form { display: flex; flex-direction: column; gap: 10px; }
 
     /* Join */
-    .join { border-color: rgba(245, 158, 11, 0.5); background: linear-gradient(180deg, rgba(245,158,11,0.10), var(--card) 70%); }
-    .join h2 { font-size: 1.2rem; }
+    .join { border-radius: 18px; padding: 18px; background: rgba(245, 158, 11, 0.10); }
 
-    /* Invite */
-    .invite-btns { display: flex; gap: 8px; }
-    .invite-btns .btn-warm { flex: 1; }
-    .link-opts { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; font-size: 0.85rem; color: var(--muted); }
-    .link-opts .opt { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-    .link-off { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-    .card-foot { margin-top: 10px; text-align: center; }
+    /* Summary */
+    .bar { height: 8px; border-radius: 999px; background: var(--field); overflow: hidden; display: flex; }
+    .bar span { display: block; height: 100%; transition: width 0.4s ease; }
+    .bar .b-ready { background: var(--good); }
+    .bar .b-claimed { background: var(--warm); }
+    .summary-text { margin-top: 10px; font-size: 0.95rem; color: var(--muted); }
+    .summary-text b { color: var(--text); }
+    .summary-mine { margin-top: 4px; font-size: 0.9rem; color: var(--muted); }
 
-    /* Your list */
-    .mine-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-    .mine-item { display: flex; align-items: center; gap: 12px; padding: 10px 4px; cursor: pointer; border-radius: 12px; }
-    .mine-item:hover { background: var(--card-2); }
-    .tick { width: 26px; height: 26px; flex: none; border-radius: 8px; border: 2px solid #4a4458; display: inline-flex; align-items: center;
-            justify-content: center; font-weight: 900; font-size: 0.85rem; color: transparent; }
-    .mine-item.ready .tick { background: var(--good); border-color: var(--good); color: #052e14; }
-    .mine-item.ready .mine-name { color: var(--muted); text-decoration: line-through; }
-    .mine-name { font-weight: 600; overflow-wrap: anywhere; }
-    .all-ready { margin-top: 8px; color: var(--good); font-weight: 600; font-size: 0.9rem; }
+    /* "What are you bringing?" */
+    .bring-form { display: flex; align-items: center; gap: 10px; padding: 4px 4px 4px 2px; border-bottom: 1.5px solid var(--hair); }
+    .bring-form:focus-within { border-bottom-color: var(--warm); }
+    .bring-form .plus { width: 34px; flex: none; text-align: center; font-size: 1.5rem; color: var(--warm); font-weight: 300; }
+    .bring-form input { flex: 1; background: none; border: none; padding: 12px 0; font-size: 1.05rem; }
+    .bring-form .btn-warm { padding: 8px 16px; border-radius: 999px; }
 
-    /* Progress */
-    .progress-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-    .progress-line b { font-size: 1.15rem; }
-    .bar { height: 12px; border-radius: 999px; background: #0f0d16; overflow: hidden; }
-    .bar span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--warm), var(--good)); transition: width 0.4s ease; }
-    .progress-sub { margin-top: 10px; font-size: 0.9rem; color: var(--muted); }
+    /* The list */
+    .course { margin-top: 26px; }
+    .course-title { display: flex; align-items: baseline; gap: 8px; margin: 0 0 2px; font-size: 1rem; font-weight: 800; }
+    .course-title .count { color: var(--faint); font-weight: 600; font-size: 0.85rem; }
+    ul.list { list-style: none; margin: 0; padding: 0; }
+    .entry { border-bottom: 1px solid var(--hair); }
+    .line { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 8px 2px; }
+    .mark { width: 34px; height: 34px; flex: none; display: grid; place-items: center; background: none; border: none; padding: 0; cursor: pointer;
+            border-radius: 50%; }
+    .mark:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
+    .ring { width: 24px; height: 24px; border-radius: 50%; border: 2px dashed #57506a; display: grid; place-items: center; }
+    .m-open:hover .ring { border-color: var(--warm); }
+    .m-mine .ring { border: 2.5px solid var(--c); }
+    .m-mine .ring svg { width: 15px; height: 15px; opacity: 0; transition: opacity 0.15s; }
+    .m-mine:hover .ring svg { opacity: 0.5; }
+    .check { width: 32px; height: 32px; }
+    .check path, .ring path { fill: none; stroke: var(--good); stroke-width: 3.4; stroke-linecap: round; stroke-linejoin: round; }
+    .m-ready .check { animation: pop 0.25s ease-out; }
+    @keyframes pop { from { transform: scale(0.6); } to { transform: scale(1); } }
+    .text { flex: 1; min-width: 0; cursor: pointer; background: none; border: none; padding: 0; text-align: left; }
+    .name { display: block; font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+    .entry.ready .name { color: var(--muted); }
+    .sub { display: block; margin-top: 2px; font-size: 0.84rem; color: var(--muted); }
+    .sub .who { color: var(--c); font-weight: 700; }
+    .sub .needs { color: var(--faint); }
+    .sub .ok { color: var(--good); font-weight: 600; }
+    .bring { appearance: none; background: none; border: none; color: var(--warm-text); font-weight: 700; font-size: 0.9rem; cursor: pointer;
+             padding: 10px 4px; white-space: nowrap; }
+    .bring:hover { color: var(--warm); }
+    .add-line { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 4px 2px; }
+    .add-line .plus { width: 34px; flex: none; text-align: center; font-size: 1.3rem; color: var(--faint); }
+    .add-line .link { color: var(--faint); font-weight: 500; font-size: 0.92rem; }
+    .add-line .link:hover { color: var(--warm-text); }
+    .add-line form { flex: 1; }
 
-    /* Courses */
-    .course-head { display: flex; align-items: center; gap: 8px; margin: 2px 4px 8px; font-size: 1rem; font-weight: 800; }
-    .course-head .count { color: var(--faint); font-weight: 600; font-size: 0.85rem; }
-    ul.items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-    .item { background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
-    .item.needed { border-style: dashed; border-color: #3d3650; }
-    .item-row { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 16px; }
-    .item-main { flex: 1; min-width: 0; cursor: pointer; background: none; border: none; padding: 0; text-align: left; }
-    .item-name { display: block; font-weight: 650; font-size: 1rem; overflow-wrap: anywhere; }
-    .item-extra { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 0.8rem; color: var(--muted); }
-    .ready-tag { color: var(--good); font-weight: 700; }
-    .bringer { display: inline-flex; align-items: center; gap: 7px; font-size: 0.88rem; font-weight: 600; max-width: 140px; }
-    .bringer span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .bring-btn { appearance: none; border: 1.5px solid var(--warm); background: var(--warm-soft); color: #ffd28a; border-radius: 999px;
-                 padding: 7px 14px; font-size: 0.85rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
-    .bring-btn:hover { background: rgba(245, 158, 11, 0.24); }
-    .add-to-course { margin: 8px 4px 0; }
-    .add-to-course .link { color: var(--muted); font-weight: 500; }
-    .add-to-course .link:hover { color: var(--warm); }
-    .add-inline { margin-top: 8px; }
-
-    .details { border-top: 1px solid var(--line); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
-    .details-notes { white-space: pre-wrap; font-size: 0.92rem; overflow-wrap: anywhere; }
-    .details-actions { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+    .details { padding: 0 2px 16px 48px; display: flex; flex-direction: column; gap: 12px; }
+    .details-notes { white-space: pre-wrap; font-size: 0.92rem; overflow-wrap: anywhere; color: var(--text); }
+    .details-actions { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
     .who-select { display: flex; align-items: center; gap: 10px; font-size: 0.88rem; color: var(--muted); }
-    .who-select select { width: auto; padding: 8px 12px; font-size: 0.9rem; }
+    .who-select select { width: auto; padding: 7px 10px; font-size: 0.9rem; }
 
     /* Chat */
+    .section-title { margin: 0 0 12px; font-size: 1rem; font-weight: 800; }
     .chat { display: flex; flex-direction: column; gap: 12px; }
     .msg { display: flex; gap: 10px; align-items: flex-start; }
     .msg-body { flex: 1; min-width: 0; }
@@ -196,7 +206,7 @@
     .msg-meta b { color: var(--text); font-size: 0.85rem; }
     .msg-text { font-size: 0.95rem; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
     .chat-form { display: flex; gap: 8px; align-items: flex-end; }
-    .chat-form textarea { min-height: 46px; height: 46px; }
+    .chat-form textarea { min-height: 44px; height: 44px; }
     .quiet-note { font-size: 0.88rem; color: var(--faint); }
 
     .center { text-align: center; }
@@ -210,8 +220,7 @@
     @media (max-width: 480px) {
       .hero { padding: 20px 16px 18px; }
       .hero h1 { font-size: 1.5rem; }
-      .bringer { max-width: 108px; }
-      .item-row { padding: 11px 10px 11px 14px; }
+      .details { padding-left: 46px; }
     }
   `;
 
@@ -411,7 +420,18 @@
     }
 
     _renderError() {
-      return `<div class="card error"><div class="big">\u{1F37D}️</div><h2>This menu isn't available</h2><p class="hint">${esc(this._error)}</p></div>`;
+      return `<div class="error"><div class="big">\u{1F37D}️</div><h2>This menu isn't available</h2><p class="hint">${esc(this._error)}</p></div>`;
+    }
+
+    // Each dish is in one of three states (plus "ready" without anyone on it, which shows as ready).
+    _stateOf(item) {
+      if (item.done) return "ready";
+      if (!item.claimedBy) return "open";
+      return this._isMine(item) ? "mine" : "theirs";
+    }
+
+    _check(cls = "check") {
+      return `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`;
     }
 
     _renderMenu() {
@@ -420,20 +440,20 @@
       return `<div class="wrap">
         ${this._renderHero(me)}
         ${!s.host && !me ? this._renderJoin() : ""}
-        ${s.host ? this._renderInvite() : ""}
-        ${me ? this._renderMine() : ""}
-        ${me ? this._renderBring() : ""}
-        ${s.items.length ? this._renderProgress() : ""}
-        ${this._renderCourses()}
+        ${s.items.length ? this._renderSummary() : ""}
+        <div>
+          ${me ? this._renderBring() : ""}
+          ${this._renderCourses()}
+        </div>
         ${this._renderChat()}
         ${s.canManage ? `<div class="center"><button class="link quiet" data-act="delete-menu">Delete this menu</button></div>` : ""}
       </div>`;
     }
 
     _renderHero(me) {
-      const { menu, host, participants } = this._state;
+      const { menu, host, participants, canManage } = this._state;
       if (this._editingMenu) {
-        return `<section class="card"><form class="stack-form" data-form="menu">
+        return `<section class="hero"><form class="stack-form" data-form="menu">
           <h2>Edit details</h2>
           <input type="text" name="title" data-draft="menu-title" maxlength="120" value="${esc(menu.title)}" placeholder="What's the occasion?" required />
           <input type="date" name="eventDate" data-draft="menu-date" value="${esc(menu.eventDate)}" />
@@ -452,12 +472,33 @@
       const people = participants.length
         ? `<div class="hero-people"><span class="stack">${ordered.slice(0, 6).map((p) => this._avatar(p, "sm")).join("")}</span><span>${esc(sentence)}</span></div>`
         : "";
+
+      let invite = "";
+      if (host && menu.shareEnabled) {
+        invite = `<div class="hero-actions">
+          <button class="hero-btn" data-act="copy-link">\u{1F517} Copy invite link</button>
+          ${navigator.share ? `<button class="hero-btn ghost" data-act="native-share">Share…</button>` : ""}
+        </div>`;
+      } else if (host) {
+        invite = `<div class="hero-off">\u{1F512} The invite link is off, so only your family can see this.
+          ${canManage ? `<button class="link" data-act="share-on">Turn it back on</button>` : ""}</div>`;
+      }
+
       const links = [];
       if (host && me) {
         links.push(`<button class="link" data-act="edit-menu">Edit details</button>`);
         links.push(`<button class="link" data-act="rename">Your name here: ${esc(me.name)}</button>`);
+        if (canManage && menu.shareEnabled) links.push(`<button class="link" data-act="toggle-link-opts">Link options</button>`);
       }
       if (!host && me) links.push(`<button class="link" data-act="rename">Not ${esc(me.name)}? Change name</button>`);
+
+      const opts = this._linkOpts && canManage && menu.shareEnabled
+        ? `<div class="hero-opts">
+             <div class="opt"><span>Stop anyone else from using the link</span><button class="link" data-act="share-off">Turn off</button></div>
+             <div class="opt"><span>Sent it to the wrong person? Get a new link (the old one stops working)</span><button class="link" data-act="regen-link">New link</button></div>
+           </div>`
+        : "";
+
       let rename = "";
       if (this._renaming && me) {
         const { profileName, customName } = this._state;
@@ -473,20 +514,22 @@
             ${hint}
           </form>`;
       }
+
       return `<section class="hero">
         <div class="hero-emoji" aria-hidden="true">${emojiFor(menu.title)}</div>
         <h1>${esc(menu.title)}</h1>
-        ${menu.eventDate ? `<div class="hero-when">${esc(formatDate(menu.eventDate))}</div>` : ""}
-        ${left ? `<div class="pill">${esc(left)}</div>` : ""}
+        ${menu.eventDate ? `<div class="hero-when"><b>${esc(formatDate(menu.eventDate))}</b>${left ? ` · ${esc(left)}` : ""}</div>` : ""}
         ${menu.notes ? `<p class="hero-notes">${esc(menu.notes)}</p>` : ""}
         ${people}
+        ${invite}
         ${links.length ? `<div class="hero-links">${links.join("")}</div>` : ""}
+        ${opts}
         ${rename}
       </section>`;
     }
 
     _renderJoin() {
-      return `<section class="card join">
+      return `<section class="join">
         <h2>\u{1F44B} Hi! What's your name?</h2>
         <p class="hint">So everyone knows who's bringing what.</p>
         <form class="row" data-form="join">
@@ -496,117 +539,106 @@
       </section>`;
     }
 
-    _renderInvite() {
-      const { menu, canManage } = this._state;
-      if (!menu.shareEnabled) {
-        return `<section class="card link-off">
-          <div><h2>\u{1F512} Invite link is off</h2><p class="hint" style="margin:0">Only your family can see this menu right now.</p></div>
-          ${canManage ? `<button class="btn" data-act="share-on">Turn it back on</button>` : ""}
-        </section>`;
+    _renderSummary() {
+      const items = this._state.items;
+      const total = items.length;
+      const ready = items.filter((i) => i.done).length;
+      const covered = items.filter((i) => i.claimedBy || i.done).length;
+      const needed = total - covered;
+      const pct = (n) => `${((n / total) * 100).toFixed(1)}%`;
+      const mine = this._state.me ? items.filter((i) => this._isMine(i)) : [];
+      const mineReady = mine.filter((i) => i.done).length;
+      let mineLine = "";
+      if (mine.length) {
+        mineLine = `<div class="summary-mine">You're bringing <b>${mine.length}</b> ${mine.length === 1 ? "thing" : "things"}${mineReady === mine.length
+          ? ", all ready \u{1F389}"
+          : `. Tap the circle next to each one when it's ready.`}</div>`;
       }
-      const opts = this._linkOpts && canManage
-        ? `<div class="link-opts">
-             <div class="opt"><span>Stop anyone else from using the link</span><button class="link danger" data-act="share-off">Turn off</button></div>
-             <div class="opt"><span>Sent it to the wrong person? Get a new link (the old one stops working)</span><button class="link" data-act="regen-link">New link</button></div>
-           </div>`
-        : "";
-      return `<section class="card">
-        <h2>Invite people</h2>
-        <p class="hint">Send them the link. They can see the menu, sign up to bring something and chat. No account needed.</p>
-        <div class="invite-btns">
-          <button class="btn btn-warm" data-act="copy-link">\u{1F517} Copy invite link</button>
-          ${navigator.share ? `<button class="btn" data-act="native-share">Share…</button>` : ""}
-        </div>
-        ${canManage ? `<div class="card-foot"><button class="link quiet" data-act="toggle-link-opts">${this._linkOpts ? "Hide link options" : "Link options"}</button></div>` : ""}
-        ${opts}
-      </section>`;
-    }
-
-    _renderMine() {
-      const mine = this._state.items.filter((i) => this._isMine(i));
-      if (!mine.length) return "";
-      const allReady = mine.every((i) => i.done);
-      return `<section class="card">
-        <h2>\u{1F9FA} You're bringing</h2>
-        <p class="hint">Tick things off when they're ready.</p>
-        <ul class="mine-list">
-          ${mine.map((i) => `<li class="mine-item ${i.done ? "ready" : ""}" data-act="toggle-ready" data-id="${esc(i.id)}" role="checkbox" aria-checked="${i.done}">
-            <span class="tick">✓</span><span class="mine-name">${esc(i.name)}</span></li>`).join("")}
-        </ul>
-        ${allReady ? `<div class="all-ready">All set! \u{1F389}</div>` : ""}
+      return `<section>
+        <div class="bar" aria-hidden="true"><span class="b-ready" style="width:${pct(ready)}"></span><span class="b-claimed" style="width:${pct(covered - ready)}"></span></div>
+        <div class="summary-text">${needed
+          ? `<b>${covered} of ${total}</b> covered`
+          : `<b>Everything's covered</b> \u{1F389}`}${ready ? ` · ${ready} ready` : ""}</div>
+        ${mineLine}
       </section>`;
     }
 
     _renderBring() {
       const list = this._suggestions.length
         ? `<datalist id="sm-suggestions">${this._suggestions.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>` : "";
-      return `<form class="card" data-form="bring">
-        <h2>What are you bringing?</h2>
-        <div class="row" style="margin-top:10px">
-          <input type="text" name="name" data-draft="bring-name" maxlength="120" placeholder="e.g. Mac and cheese" ${list ? `list="sm-suggestions"` : ""} />
-          <button class="btn btn-warm" type="submit">Add</button>
-        </div>
+      return `<form class="bring-form" data-form="bring">
+        <span class="plus" aria-hidden="true">+</span>
+        <input type="text" name="name" data-draft="bring-name" maxlength="120" placeholder="What are you bringing?" aria-label="What are you bringing?" ${list ? `list="sm-suggestions"` : ""} />
+        <button class="btn btn-warm" type="submit">Add</button>
         ${list}
       </form>`;
     }
 
-    _renderProgress() {
-      const items = this._state.items;
-      const covered = items.filter((i) => i.claimedBy).length;
-      const needed = items.length - covered;
-      return `<section class="card">
-        <div class="progress-line"><span><b>${covered} of ${items.length}</b> covered</span></div>
-        <div class="bar"><span style="width:${((covered / items.length) * 100).toFixed(1)}%"></span></div>
-        <div class="progress-sub">${needed
-          ? `${needed} ${needed === 1 ? "thing still needs" : "things still need"} someone.${this._state.me ? " Tap <b>I'll bring it</b> on anything you can take." : ""}`
-          : "Everything's covered! \u{1F389}"}</div>
-      </section>`;
-    }
-
     _renderCourses() {
       const s = this._state;
-      if (!s.items.length && !s.me) return `<div class="card empty">Nothing on the menu yet.</div>`;
+      if (!s.items.length && !s.me) return `<div class="empty">Nothing on the menu yet.</div>`;
       // Show courses that have something, plus all of them on an empty menu so there's somewhere to start.
       const courses = Object.keys(COURSES).filter((c) => !s.items.length || s.items.some((i) => this._courseOf(i) === c) || this._addingIn === c);
       return courses.map((c) => {
         const info = COURSES[c];
         const items = s.items.filter((i) => this._courseOf(i) === c);
-        const adding = this._addingIn === c;
-        const addUi = !s.me ? "" : adding
-          ? `<form class="row add-inline" data-form="add-needed" data-course="${c}">
-               <input type="text" name="name" data-draft="need-${c}" maxlength="120" placeholder="${esc(`Add ${info.one}…`)}" />
-               <button class="btn" type="submit">Add</button>
-             </form>`
-          : `<div class="add-to-course"><button class="link" data-act="add-in" data-course="${c}">+ Add ${esc(info.one)}</button></div>`;
-        return `<section>
-          <div class="course-head"><span aria-hidden="true">${info.icon}</span><span>${esc(info.label)}</span>${items.length ? `<span class="count">${items.length}</span>` : ""}</div>
-          ${items.length ? `<ul class="items">${items.map((i) => this._renderItem(i)).join("")}</ul>` : ""}
-          ${addUi}
+        let add = "";
+        if (s.me && this._addingIn === c) {
+          add = `<div class="add-line"><span class="plus" aria-hidden="true">+</span>
+            <form class="row" data-form="add-needed" data-course="${c}">
+              <input type="text" name="name" data-draft="need-${c}" maxlength="120" placeholder="${esc(`Add ${info.one}…`)}" />
+              <button class="btn" type="submit">Add</button>
+            </form></div>`;
+        } else if (s.me) {
+          add = `<div class="add-line"><span class="plus" aria-hidden="true">+</span><button class="link" data-act="add-in" data-course="${c}">Add ${esc(info.one)}</button></div>`;
+        }
+        return `<section class="course">
+          <h3 class="course-title"><span aria-hidden="true">${info.icon}</span>${esc(info.label)}${items.length ? `<span class="count">${items.length}</span>` : ""}</h3>
+          ${items.length ? `<ul class="list">${items.map((i) => this._renderItem(i)).join("")}</ul>` : ""}
+          ${add}
         </section>`;
       }).join("");
     }
 
     _renderItem(item) {
+      const s = this._state;
+      const st = this._stateOf(item);
+      const id = esc(item.id);
       const open = this._openItem === item.id;
+      const mine = this._isMine(item);
+      const p = this._person(item.claimedBy);
+      const who = mine ? "You" : p ? p.name : "Someone";
+      const color = safeColor(p?.color);
       const n = this._commentsFor(item.id).length;
-      let who;
-      if (!item.claimedBy) {
-        who = `<button class="bring-btn" data-act="claim" data-id="${esc(item.id)}">I'll bring it</button>`;
+
+      let mark;
+      let sub;
+      if (st === "open") {
+        mark = `<button class="mark m-open" data-act="mark" data-id="${id}" aria-label="Still needed. Tap if you'll bring it"><span class="ring"></span></button>`;
+        sub = ""; // the dashed circle and "I'll bring it" already say it's needed
+      } else if (st === "mine") {
+        mark = `<button class="mark m-mine" style="--c:${color}" data-act="mark" data-id="${id}" aria-label="Mark as ready"><span class="ring">${this._check("")}</span></button>`;
+        sub = `<span class="who" style="--c:${color}">You're</span> bringing this`;
+      } else if (st === "theirs") {
+        mark = `<button class="mark m-theirs" data-act="toggle-details" data-id="${id}" aria-label="${esc(who)} is bringing this">${this._avatar(p)}</button>`;
+        sub = `<span class="who" style="--c:${color}">${esc(who)}</span> is bringing this`;
       } else {
-        const p = this._person(item.claimedBy);
-        who = `<span class="bringer">${this._avatar(p, "sm")}<span>${this._isMine(item) ? "You" : esc(p ? p.name : "Someone")}</span></span>`;
+        mark = `<button class="mark m-ready" data-act="${mine ? "mark" : "toggle-details"}" data-id="${id}" aria-label="${mine ? "Ready. Tap to undo" : "Ready"}">${this._check()}</button>`;
+        sub = `<span class="ok">Ready</span>${item.claimedBy ? ` · <span class="who" style="--c:${color}">${esc(who)}</span>` : ""}`;
       }
-      const extra = [];
-      if (item.done) extra.push(`<span class="ready-tag">✓ Ready</span>`);
-      if (n) extra.push(`<span>\u{1F4AC} ${n}</span>`);
-      if (item.notes && !open) extra.push(`<span>\u{1F4DD} Note</span>`);
-      return `<li class="item ${item.claimedBy ? "" : "needed"}">
-        <div class="item-row">
-          <button class="item-main" data-act="toggle-details" data-id="${esc(item.id)}" aria-expanded="${open}">
-            <span class="item-name">${esc(item.name)}</span>
-            ${extra.length ? `<span class="item-extra">${extra.join("")}</span>` : ""}
+      const extras = [];
+      if (n) extras.push(`\u{1F4AC} ${n}`);
+      if (item.notes && !open) extras.push("\u{1F4DD} note");
+      sub = [sub, ...extras].filter(Boolean).join(" · ");
+
+      return `<li class="entry ${st}">
+        <div class="line">
+          ${mark}
+          <button class="text" data-act="toggle-details" data-id="${id}" aria-expanded="${open}">
+            <span class="name">${esc(item.name)}</span>
+            ${sub ? `<span class="sub">${sub}</span>` : ""}
           </button>
-          ${who}
+          ${st === "open" ? `<button class="bring" data-act="claim" data-id="${id}">I'll bring it</button>` : ""}
         </div>
         ${open ? this._renderDetails(item) : ""}
       </li>`;
@@ -670,7 +702,7 @@
     }
 
     _renderChat() {
-      return `<section class="card"><h2 style="margin-bottom:12px">\u{1F4AC} Chat</h2>${this._renderThread(null)}</section>`;
+      return `<section><h3 class="section-title">\u{1F4AC} Chat</h3>${this._renderThread(null)}</section>`;
     }
 
     // ---- Events ----
@@ -692,6 +724,23 @@
           if (this._openItem !== this._editingItem) this._editingItem = null;
           this.render();
           break;
+        case "mark": {
+          // The circle next to a dish moves it along: needed -> you're bringing it -> ready (and back).
+          const item = this._item(id);
+          if (!item) return;
+          const st = this._stateOf(item);
+          if (st === "open") {
+            if (!s.me) return this._needName();
+            this._do("PUT", `/items/${encodeURIComponent(id)}`, { claimedBy: s.me }, { optimistic: () => { item.claimedBy = s.me; } });
+          } else if (this._isMine(item)) {
+            const done = !item.done;
+            this._do("PUT", `/items/${encodeURIComponent(id)}`, { done }, { optimistic: () => { item.done = done; } });
+          } else {
+            this._openItem = this._openItem === id ? null : id;
+            this.render();
+          }
+          break;
+        }
         case "claim": {
           if (!s.me) return this._needName();
           const item = this._item(id);
