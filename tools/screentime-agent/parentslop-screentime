@@ -10,6 +10,11 @@ Runs as root (systemd unit parentslop-screentime.service):
   * As the end gets close it shows desktop notifications (thresholds come from the server, e.g. 15/5/1
     minutes). At zero it starts a grace countdown (e.g. 2 minutes) and then logs the kid out
     (loginctl terminate-user).
+  * Notifications are made for gaming (checked against GNOME Shell 46's messageTray.js): GNOME never gives a
+    banner keyboard focus by itself (only if the pointer moves onto it, a click, or Super+N). They're sent
+    as critical, because GNOME holds back normal ones while a fullscreen window is focused, and we close
+    each banner ourselves after a few seconds (banner_seconds), because critical banners otherwise stay up
+    until dismissed, which leaves room for an accidental mouse-over to take focus from the game.
   * It writes the result to a state file that the PAM check (`pam-check`, run by pam_exec) reads to stop
     a kid with no time left from logging back in.
   * Offline it keeps counting locally and enforces from the last numbers it got (or the plain weekday/
@@ -26,7 +31,7 @@ Usage:
   parentslop-screentime test-notify LOGIN   send LOGIN a test notification
 
 Config: /etc/parentslop-screentime.conf (key = value): server, token, group, tick, report_every,
-count_idle, offline (enforce | open).
+count_idle, offline (enforce | open), banner_seconds.
 """
 
 import datetime
@@ -53,6 +58,7 @@ DEFAULT_CONF = {
     "report_every": 60,     # seconds between server reports (sooner when someone logs in or out)
     "count_idle": False,    # count time while the session is idle
     "offline": "enforce",   # enforce: keep enforcing from cached numbers; open: stop enforcing after 15 min offline
+    "banner_seconds": 8,    # take our notification banners down after this long (0 = leave them up)
 }
 OPEN_AFTER_OFFLINE = 15 * 60
 RELOGIN_NOTICE = 30         # seconds of warning for someone who gets back in after being logged out
@@ -75,6 +81,8 @@ def load_conf(path=CONF_PATH):
                 k, v = (x.strip() for x in line.split("=", 1))
                 if k in ("tick", "report_every"):
                     conf[k] = max(1, int(v))
+                elif k == "banner_seconds":
+                    conf[k] = max(0, int(v))
                 elif k == "count_idle":
                     conf[k] = v.lower() in ("1", "yes", "true", "on")
                 else:
@@ -172,15 +180,24 @@ class System:
         except KeyError:
             return -1
 
-    def notify(self, login, title, body, urgency="normal", replace_id=None):
-        """Show a desktop notification in LOGIN's session(s). Returns the notification id (to replace it)."""
+    def _as_user(self, login):
+        """Command prefix to run something on LOGIN's session bus, or None if they have no session bus."""
         uid = self._uid(login)
         bus = f"/run/user/{uid}/bus"
         if uid < 1000 or not os.path.exists(bus):
             return None
-        cmd = ["runuser", "-u", login, "--", "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
-               "notify-send", "--app-name=Screen Time", f"--urgency={urgency}", "--icon=alarm-symbolic",
-               "--print-id"]
+        return ["runuser", "-u", login, "--", "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}"]
+
+    def notify(self, login, title, body, replace_id=None):
+        """Show a desktop notification in LOGIN's session(s). Returns the notification id (to replace/close it).
+
+        Always critical: GNOME doesn't show normal notifications over a fullscreen window (a game), and
+        critical ones still never take keyboard focus by themselves. The agent closes them (close())."""
+        prefix = self._as_user(login)
+        if not prefix:
+            return None
+        cmd = prefix + ["notify-send", "--app-name=Screen Time", "--urgency=critical", "--icon=alarm-symbolic",
+                        "--print-id"]
         if replace_id:
             cmd.append(f"--replace-id={replace_id}")
         cmd += [title, body]
@@ -193,6 +210,19 @@ class System:
         except (subprocess.SubprocessError, ValueError, OSError) as e:
             log(f"notify {login} failed: {e}")
             return None
+
+    def close(self, login, nid):
+        """Take one of our notifications down (org.freedesktop.Notifications.CloseNotification)."""
+        prefix = self._as_user(login)
+        if not prefix:
+            return
+        try:
+            subprocess.run(prefix + ["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+                                     "--object-path", "/org/freedesktop/Notifications",
+                                     "--method", "org.freedesktop.Notifications.CloseNotification", f"uint32 {int(nid)}"],
+                           capture_output=True, timeout=10)
+        except (subprocess.SubprocessError, OSError) as e:
+            log(f"close notification for {login} failed: {e}")
 
     def terminate(self, login):
         log(f"logging out {login}")
@@ -227,6 +257,7 @@ def empty_state(date):
         "logged_out": {},  # login -> wall clock we last logged them out
         "kick_at": {},     # login -> wall clock to log out someone who got back in
         "notify_id": {},   # login -> id of our notification on screen (to replace it)
+        "close_at": {},    # login -> [notification id, wall clock to take it down]
         "countdown_at": {},  # login -> when the grace countdown was last refreshed
         "blocked": {},     # login -> True when they have no time left (the PAM check reads this)
         "states": {},      # login -> ok | warning | grace | blocked | offline (shown to parents)
@@ -265,6 +296,8 @@ class Agent:
         self.state_path = state_path
         st = load_state(state_path)
         self.state = st if st and st.get("date") == self.today() else self._new_day(st)
+        for k, v in empty_state(self.state["date"]).items():
+            self.state.setdefault(k, v)  # state files from older versions
         self.last_report = 0
         self.last_tick = None
         self.last_present = None
@@ -393,6 +426,13 @@ class Agent:
             self.state["blocked"].pop(login, None)  # no longer managed: let them in
             self.state["states"].pop(login, None)
 
+        for login, (nid, at) in list(self.state["close_at"].items()):
+            if now >= at:
+                self.sys.close(login, nid)
+                self._set("close_at", login, None)
+                if self.state["notify_id"].get(login) == nid:
+                    self._set("notify_id", login, None)
+
         self.state["updated_at"] = now
         if self.dirty or int(now) % 30 < self.conf["tick"]:
             save_state(self.state, self.state_path)
@@ -407,11 +447,13 @@ class Agent:
             self.state[key][login] = value
             self.dirty = True
 
-    def _notify(self, login, title, body, urgency="normal", replace=False):
+    def _notify(self, login, title, body, replace=True):
         rid = self.state["notify_id"].get(login) if replace else None
-        nid = self.sys.notify(login, title, body, urgency, rid)
+        nid = self.sys.notify(login, title, body, rid)
         if nid:
             self._set("notify_id", login, nid)
+            if self.conf["banner_seconds"]:
+                self._set("close_at", login, [nid, self.clock() + self.conf["banner_seconds"]])
 
     def enforce(self, login, sessions, now):
         st = self.state
@@ -434,7 +476,7 @@ class Agent:
                 self._set("kick_at", login, None)
                 self._set("logged_out", login, None)
                 if logged_in:
-                    self._notify(login, "More screen time!", f"You have {fmt_duration(rem)} left today.", "normal", replace=True)
+                    self._notify(login, "More screen time!", f"You have {fmt_duration(rem)} left today.")
             thresholds = sorted(info.get("warn") or [], reverse=True)
             crossed = [w for w in thresholds if rem <= w * 60]
             warned = [w for w in st["warned"].get(login, []) if w in crossed]  # re-arm if time was added
@@ -443,8 +485,7 @@ class Agent:
                 urgent = min(new) <= 5
                 self._notify(login, "Screen time is almost up" if urgent else "Screen time check",
                              f"You have {fmt_duration(rem)} of screen time left today."
-                             + (" Start wrapping up and save your work." if urgent else ""),
-                             "critical" if urgent else "normal", replace=True)
+                             + (" Start wrapping up and save your work." if urgent else ""))
                 warned = crossed
             self._set("warned", login, sorted(warned, reverse=True) or None)
             self._set("states", login, "offline" if offline else ("warning" if crossed else "ok"))
@@ -466,13 +507,13 @@ class Agent:
             self._set("countdown_at", login, now)
             if grace:
                 self._notify(login, "Screen time is up!",
-                             f"Save your work now. You'll be logged out in {fmt_duration(grace)}.", "critical", replace=True)
+                             f"Save your work now. You'll be logged out in {fmt_duration(grace)}.")
         if now < grace_ends:
             self._set("states", login, "grace")
             if now - st["countdown_at"].get(login, 0) >= COUNTDOWN_EVERY:
                 self._set("countdown_at", login, now)
                 self._notify(login, "Screen time is up!",
-                             f"Save your work now. Logging out in {fmt_clock(grace_ends - now)}.", "critical", replace=True)
+                             f"Save your work now. Logging out in {fmt_clock(grace_ends - now)}.")
             return
         if not st["logged_out"].get(login):
             # Grace is over.
@@ -483,7 +524,7 @@ class Agent:
         if kick_at is None:
             self._set("kick_at", login, now + RELOGIN_NOTICE)
             self._set("states", login, "grace")
-            self._notify(login, "No screen time left", f"{NO_TIME_MESSAGE} Logging out in {RELOGIN_NOTICE} seconds.", "critical")
+            self._notify(login, "No screen time left", f"{NO_TIME_MESSAGE} Logging out in {RELOGIN_NOTICE} seconds.", replace=False)
         elif now >= kick_at:
             self._logout(login, now)
 
@@ -492,6 +533,7 @@ class Agent:
         self._set("logged_out", login, now)
         self._set("kick_at", login, None)
         self._set("notify_id", login, None)
+        self._set("close_at", login, None)
         self._set("states", login, "blocked")
 
     def run(self):
@@ -560,7 +602,10 @@ def main(argv):
                   f"{'  BLOCKED' if st.get('blocked', {}).get(login) else ''}")
         return 0
     if cmd == "test-notify" and len(argv) > 2:
-        nid = System().notify(argv[2], "Screen time test", "Notifications from ParentSlop are working.", "normal")
+        nid = System().notify(argv[2], "Screen time test", "Notifications from ParentSlop are working. This disappears by itself.")
+        if nid:
+            time.sleep(load_conf()["banner_seconds"] or 0)
+            System().close(argv[2], nid)
         print("sent" if nid else "failed (is that user logged in to a desktop?)")
         return 0 if nid else 1
     if cmd == "run":

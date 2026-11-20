@@ -40,8 +40,11 @@ class FakeSystem:
     def __init__(self, group=("en", "nadia")):
         self.group = set(group)
         self.current = []
-        self.notes = []       # (login, title, body, urgency, replace_id)
+        self.notes = []       # (login, title, body, replace_id)
+        self.closed = []      # (login, id, when)
+        self.on_screen = {}   # id -> login: banners currently showing
         self.terminated = []
+        self.clock = None
         self._id = 0
 
     def sessions(self):
@@ -50,10 +53,18 @@ class FakeSystem:
     def group_members(self, name):
         return set(self.group)
 
-    def notify(self, login, title, body, urgency="normal", replace_id=None):
+    def notify(self, login, title, body, replace_id=None):
+        self.notes.append((login, title, body, replace_id))
+        # Like GNOME: replacing a notification that's gone makes a new one.
+        if replace_id and replace_id in self.on_screen:
+            return replace_id
         self._id += 1
-        self.notes.append((login, title, body, urgency, replace_id))
-        return replace_id or self._id
+        self.on_screen[self._id] = login
+        return self._id
+
+    def close(self, login, nid):
+        self.closed.append((login, nid, self.clock() if self.clock else None))
+        self.on_screen.pop(nid, None)
 
     def terminate(self, login):
         self.terminated.append(login)
@@ -95,6 +106,7 @@ class AgentTest(unittest.TestCase):
         self.state_path = os.path.join(self.dir.name, "state.json")
         self.clock = Clock()
         self.sys = FakeSystem()
+        self.sys.clock = self.clock
         self.api = FakeApi(self.clock)
         conf = dict(pst.DEFAULT_CONF, token="x", tick=5, report_every=60)
         self.agent = pst.Agent(conf, self.sys, self.api, clock=self.clock, today=lambda: self.clock.date, state_path=self.state_path)
@@ -160,10 +172,8 @@ class AgentTest(unittest.TestCase):
         self.sys.current = [sess("en")]
         self.run_for(6 * 60)  # 14 minutes left: crossed 15
         self.assertEqual(self.titles(), ["Screen time check"])
-        self.assertEqual(self.sys.notes[0][3], "normal")
         self.run_for(10 * 60)  # 4 left: crossed 5
         self.assertEqual(self.titles()[-1], "Screen time is almost up")
-        self.assertEqual(self.sys.notes[-1][3], "critical")
         self.run_for(3 * 60 + 30)  # under a minute
         self.assertEqual(len([t for t in self.titles() if t == "Screen time is almost up"]), 2, "one warning per threshold")
         self.assertEqual(self.agent.state["states"]["en"], "warning")
@@ -177,7 +187,8 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(self.pam("en"), 1, "can't start a second session during grace")
         self.run_for(60)
         self.assertRegex(self.sys.notes[-1][2], r"Logging out in [01]:\d\d")
-        self.assertIsNotNone(self.sys.notes[-1][4], "countdown replaces the notification")
+        self.run_for(10)
+        self.assertEqual(self.sys.on_screen, {}, "countdown banners are taken down again")
         self.run_for(65)
         self.assertEqual(self.sys.terminated, ["en"])
         self.assertEqual(self.agent.state["states"]["en"], "blocked")
@@ -237,6 +248,45 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(self.agent.state["states"]["en"], "blocked")
         self.assertEqual(self.pam("en"), 1)
         self.assertEqual(self.sys.notes, [])
+
+    def test_banners_close_by_themselves(self):
+        """No banner is left on screen over a game: each one is closed after banner_seconds."""
+        self.api.people["en"]["weekday"] = 16
+        self.agent.tick()
+        self.sys.current = [sess("en")]
+        self.run_for(70)  # 15 min left: first warning
+        self.assertEqual(len(self.sys.notes), 1)
+        shown_at = self.clock.t
+        self.run_for(10)
+        self.assertEqual(len(self.sys.closed), 1)
+        login, nid, when = self.sys.closed[0]
+        self.assertEqual(login, "en")
+        self.assertLessEqual(when - shown_at, 8 + 5, "closed within a tick of banner_seconds")
+        self.assertEqual(self.sys.on_screen, {})
+        # Run through warnings, grace and logout: nothing stays up.
+        self.run_for(18 * 60)
+        self.assertEqual(self.sys.terminated, ["en"])
+        self.assertEqual(self.sys.on_screen, {})
+        self.assertGreaterEqual(len(self.sys.closed), len(self.sys.notes) - 1)
+
+    def test_countdown_reappears_while_in_grace(self):
+        self.api.people["en"]["weekday"] = 1
+        self.agent.tick()
+        self.sys.current = [sess("en")]
+        self.run_for(65)
+        self.assertEqual(self.agent.state["states"]["en"], "grace")
+        n = len([t for t in self.titles() if t == "Screen time is up!"])
+        self.run_for(61)
+        self.assertGreaterEqual(len([t for t in self.titles() if t == "Screen time is up!"]), n + 2, "a fresh banner every 30 s")
+
+    def test_banners_can_be_left_up(self):
+        self.agent.conf["banner_seconds"] = 0
+        self.api.people["en"]["weekday"] = 3
+        self.agent.tick()
+        self.sys.current = [sess("en")]
+        self.run_for(30)
+        self.assertEqual(self.sys.closed, [])
+        self.assertEqual(len(self.sys.on_screen), 1)
 
     # --- safety ---
 
