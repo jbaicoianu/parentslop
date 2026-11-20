@@ -194,6 +194,9 @@
     .details { padding: 0 2px 16px 48px; display: flex; flex-direction: column; gap: 12px; }
     .details-notes { white-space: pre-wrap; font-size: 0.92rem; overflow-wrap: anywhere; color: var(--text); }
     .details-actions { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+    .people-on { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+    .people-on li { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; }
+    .people-on .ok { color: var(--good); font-weight: 600; font-size: 0.82rem; }
     .who-select { display: flex; align-items: center; gap: 10px; font-size: 0.88rem; color: var(--muted); }
     .who-select select { width: auto; padding: 7px 10px; font-size: 0.9rem; }
 
@@ -361,7 +364,14 @@
 
     _person(id) { return this._state?.participants.find((p) => p.id === id) || null; }
     _item(id) { return this._state?.items.find((i) => i.id === id); }
-    _isMine(item) { return !!this._state.me && item.claimedBy === this._state.me; }
+    // Sign-ups. An item wants 1 person (default), a set number, or anyone who likes (wanted = 0).
+    _myClaim(item) { return this._state.me ? (item.claims || []).find((c) => c.participantId === this._state.me) || null : null; }
+    _isMine(item) { return !!this._myClaim(item); }
+    _wanted(item) { return item.wanted == null ? 1 : item.wanted; }
+    _isMulti(item) { return this._wanted(item) !== 1; }
+    _full(item) { const w = this._wanted(item); return w > 0 && (item.claims || []).length >= w; }
+    _covered(item) { const n = (item.claims || []).length; return n > 0 && (this._wanted(item) === 0 || n >= this._wanted(item)); }
+    _ready(item) { return this._covered(item) && item.claims.every((c) => c.done); }
     _canDeleteItem(item) { return !!this._state.me && (this._state.host || item.addedBy === this._state.me); }
     _canDeleteComment(c) { return !!this._state.me && (this._state.host || c.participantId === this._state.me); }
     _commentsFor(itemId) { return this._state.comments.filter((c) => (c.itemId || null) === (itemId || null)); }
@@ -423,11 +433,13 @@
       return `<div class="error"><div class="big">\u{1F37D}️</div><h2>This menu isn't available</h2><p class="hint">${esc(this._error)}</p></div>`;
     }
 
-    // Each dish is in one of three states (plus "ready" without anyone on it, which shows as ready).
+    // How a dish looks to you: "open" (there's room for you), "mine" (you're bringing it / some of it),
+    // "ready" (your part is ready, or it's all ready), "theirs" (others have it covered).
     _stateOf(item) {
-      if (item.done) return "ready";
-      if (!item.claimedBy) return "open";
-      return this._isMine(item) ? "mine" : "theirs";
+      const mine = this._myClaim(item);
+      if (mine) return mine.done ? "ready" : "mine";
+      if (!this._full(item)) return "open";
+      return this._ready(item) ? "ready" : "theirs";
     }
 
     _check(cls = "check") {
@@ -542,12 +554,12 @@
     _renderSummary() {
       const items = this._state.items;
       const total = items.length;
-      const ready = items.filter((i) => i.done).length;
-      const covered = items.filter((i) => i.claimedBy || i.done).length;
+      const ready = items.filter((i) => this._ready(i)).length;
+      const covered = items.filter((i) => this._covered(i)).length;
       const needed = total - covered;
       const pct = (n) => `${((n / total) * 100).toFixed(1)}%`;
-      const mine = this._state.me ? items.filter((i) => this._isMine(i)) : [];
-      const mineReady = mine.filter((i) => i.done).length;
+      const mine = items.filter((i) => this._isMine(i));
+      const mineReady = mine.filter((i) => this._myClaim(i).done).length;
       let mineLine = "";
       if (mine.length) {
         mineLine = `<div class="summary-mine">You're bringing <b>${mine.length}</b> ${mine.length === 1 ? "thing" : "things"}${mineReady === mine.length
@@ -600,37 +612,59 @@
       }).join("");
     }
 
+    // "You, Alex ✓ and Sam", each name in their color (you first; ✓ = their part is ready).
+    _peopleOn(item, { ticks = true } = {}) {
+      const me = this._state.me;
+      const claims = [...item.claims].sort((a, b) => (b.participantId === me) - (a.participantId === me));
+      const parts = claims.map((c) => {
+        const p = this._person(c.participantId);
+        const name = c.participantId === me ? "You" : p ? p.name : "Someone";
+        return `<span class="who" style="--c:${safeColor(p?.color)}">${esc(name)}</span>${ticks && c.done ? ` <span class="ok">✓</span>` : ""}`;
+      });
+      if (parts.length <= 1) return parts.join("");
+      return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+    }
+
     _renderItem(item) {
-      const s = this._state;
       const st = this._stateOf(item);
       const id = esc(item.id);
       const open = this._openItem === item.id;
-      const mine = this._isMine(item);
-      const p = this._person(item.claimedBy);
-      const who = mine ? "You" : p ? p.name : "Someone";
-      const color = safeColor(p?.color);
+      const multi = this._isMulti(item);
+      const wanted = this._wanted(item);
+      const mine = this._myClaim(item);
+      const first = this._person(item.claims[0]?.participantId);
+      const myColor = safeColor(this._person(this._state.me)?.color);
       const n = this._commentsFor(item.id).length;
 
       let mark;
-      let sub;
       if (st === "open") {
-        mark = `<button class="mark m-open" data-act="mark" data-id="${id}" aria-label="Still needed. Tap if you'll bring it"><span class="ring"></span></button>`;
-        sub = ""; // the dashed circle and "I'll bring it" already say it's needed
+        mark = `<button class="mark m-open" data-act="mark" data-id="${id}" aria-label="${multi ? "Tap to bring some" : "Still needed. Tap if you'll bring it"}"><span class="ring"></span></button>`;
       } else if (st === "mine") {
-        mark = `<button class="mark m-mine" style="--c:${color}" data-act="mark" data-id="${id}" aria-label="Mark as ready"><span class="ring">${this._check("")}</span></button>`;
-        sub = `<span class="who" style="--c:${color}">You're</span> bringing this`;
+        mark = `<button class="mark m-mine" style="--c:${myColor}" data-act="mark" data-id="${id}" aria-label="Mark as ready"><span class="ring">${this._check("")}</span></button>`;
       } else if (st === "theirs") {
-        mark = `<button class="mark m-theirs" data-act="toggle-details" data-id="${id}" aria-label="${esc(who)} is bringing this">${this._avatar(p)}</button>`;
-        sub = `<span class="who" style="--c:${color}">${esc(who)}</span> is bringing this`;
+        mark = `<button class="mark m-theirs" data-act="toggle-details" data-id="${id}" aria-label="${esc(first ? first.name : "Someone")} is bringing this">${this._avatar(first)}</button>`;
       } else {
         mark = `<button class="mark m-ready" data-act="${mine ? "mark" : "toggle-details"}" data-id="${id}" aria-label="${mine ? "Ready. Tap to undo" : "Ready"}">${this._check()}</button>`;
-        sub = `<span class="ok">Ready</span>${item.claimedBy ? ` · <span class="who" style="--c:${color}">${esc(who)}</span>` : ""}`;
+      }
+
+      let sub = "";
+      if (!multi) {
+        if (st === "mine") sub = `<span class="who" style="--c:${myColor}">You're</span> bringing this`;
+        else if (st === "theirs") sub = `${this._peopleOn(item)} is bringing this`;
+        else if (st === "ready") sub = `<span class="ok">Ready</span> · ${this._peopleOn(item, { ticks: false })}`;
+      } else if (!item.claims.length) {
+        sub = `<span class="needs">${wanted === 0 ? "Anyone can bring some" : `Needs ${wanted} people`}</span>`;
+      } else {
+        const count = wanted === 0 ? "more welcome" : this._full(item) ? `all ${wanted} covered` : `${item.claims.length} of ${wanted}`;
+        const allReady = this._ready(item);
+        sub = `${allReady ? `<span class="ok">Ready</span> · ` : ""}${this._peopleOn(item, { ticks: !allReady })} · <span class="needs">${count}</span>`;
       }
       const extras = [];
       if (n) extras.push(`\u{1F4AC} ${n}`);
       if (item.notes && !open) extras.push("\u{1F4DD} note");
       sub = [sub, ...extras].filter(Boolean).join(" · ");
 
+      const cta = st === "open" ? `<button class="bring" data-act="claim" data-id="${id}">${multi ? "Count me in" : "I'll bring it"}</button>` : "";
       return `<li class="entry ${st}">
         <div class="line">
           ${mark}
@@ -638,10 +672,16 @@
             <span class="name">${esc(item.name)}</span>
             ${sub ? `<span class="sub">${sub}</span>` : ""}
           </button>
-          ${st === "open" ? `<button class="bring" data-act="claim" data-id="${id}">I'll bring it</button>` : ""}
+          ${cta}
         </div>
         ${open ? this._renderDetails(item) : ""}
       </li>`;
+    }
+
+    _wantedOptions(current) {
+      const opts = [[1, "Just one person"], [2, "2 people"], [3, "3 people"], [4, "4 people"], [5, "5 people"], [6, "6 people"], [8, "8 people"], [10, "10 people"], [0, "Anyone who wants to"]];
+      if (!opts.some(([v]) => v === current)) opts.splice(-1, 0, [current, `${current} people`]);
+      return opts.map(([v, l]) => `<option value="${v}" ${v === current ? "selected" : ""}>${l}</option>`).join("");
     }
 
     _renderDetails(item) {
@@ -650,28 +690,50 @@
       if (this._editingItem === item.id) {
         return `<div class="details"><form class="stack-form" data-form="edit-item" data-id="${id}">
           <input type="text" name="name" data-draft="edit-name-${id}" maxlength="120" value="${esc(item.name)}" required />
-          <select name="category" data-draft="edit-cat-${id}" aria-label="Course">
-            ${Object.entries(COURSES).map(([k, v]) => `<option value="${k}" ${k === this._courseOf(item) ? "selected" : ""}>${v.icon} ${esc(v.label)}</option>`).join("")}
-          </select>
+          <div class="row">
+            <select name="category" data-draft="edit-cat-${id}" aria-label="Course">
+              ${Object.entries(COURSES).map(([k, v]) => `<option value="${k}" ${k === this._courseOf(item) ? "selected" : ""}>${v.icon} ${esc(v.label)}</option>`).join("")}
+            </select>
+            <select name="wanted" data-draft="edit-wanted-${id}" aria-label="How many people can bring it?">${this._wantedOptions(this._wanted(item))}</select>
+          </div>
           <textarea name="notes" data-draft="edit-notes-${id}" rows="2" maxlength="1000" placeholder="Notes: how much, recipe link, gluten-free…">${esc(item.notes)}</textarea>
           <div class="row"><button class="btn btn-warm" type="submit">Save</button><button class="btn" type="button" data-act="cancel-edit">Cancel</button></div>
         </form></div>`;
       }
+      const mine = this._myClaim(item);
+      const multi = this._isMulti(item);
       const actions = [];
       if (s.me) {
-        if (this._isMine(item)) {
-          actions.push(`<button class="link" data-act="toggle-ready" data-id="${id}">${item.done ? "Not ready after all" : "✓ Mark as ready"}</button>`);
+        if (mine) {
+          actions.push(`<button class="link" data-act="toggle-ready" data-id="${id}">${mine.done ? "Not ready after all" : multi ? "✓ My part is ready" : "✓ Mark as ready"}</button>`);
           actions.push(`<button class="link quiet" data-act="unclaim" data-id="${id}">I can't bring it anymore</button>`);
         }
-        actions.push(`<button class="link quiet" data-act="edit-item" data-id="${id}">${item.notes ? "Edit" : "Add a note"}</button>`);
+        actions.push(`<button class="link quiet" data-act="edit-item" data-id="${id}">${item.notes ? "Edit" : "Edit / add a note"}</button>`);
         if (this._canDeleteItem(item)) actions.push(`<button class="link quiet" data-act="delete-item" data-id="${id}">Remove</button>`);
       }
-      const who = s.host && s.me
-        ? `<label class="who-select">Who's bringing it?
+
+      // Family members can see and change who's on it.
+      let who = "";
+      if (s.host && s.me && !multi) {
+        const current = item.claims[0]?.participantId || "";
+        who = `<label class="who-select">Who's bringing it?
              <select data-act="assign" data-id="${id}"><option value="">Nobody yet</option>
-               ${s.participants.map((p) => `<option value="${esc(p.id)}" ${p.id === item.claimedBy ? "selected" : ""}>${esc(p.id === s.me ? `${p.name} (you)` : p.name)}</option>`).join("")}
-             </select></label>`
-        : "";
+               ${s.participants.map((p) => `<option value="${esc(p.id)}" ${p.id === current ? "selected" : ""}>${esc(p.id === s.me ? `${p.name} (you)` : p.name)}</option>`).join("")}
+             </select></label>`;
+      } else if (multi && item.claims.length) {
+        const rows = item.claims.map((c) => {
+          const p = this._person(c.participantId);
+          const name = c.participantId === s.me ? "You" : p ? p.name : "Someone";
+          return `<li>${this._avatar(p, "sm")}<span>${esc(name)}</span>${c.done ? `<span class="ok">✓ ready</span>` : ""}
+            ${s.host && s.me && c.participantId !== s.me ? `<button class="link quiet" data-act="remove-claim" data-id="${id}" data-pid="${esc(c.participantId)}">take off</button>` : ""}</li>`;
+        }).join("");
+        const addable = s.host && s.me && !this._full(item) ? s.participants.filter((p) => !item.claims.some((c) => c.participantId === p.id)) : [];
+        who = `<ul class="people-on">${rows}</ul>${addable.length
+          ? `<label class="who-select">Add someone:
+               <select data-act="add-person" data-id="${id}"><option value="">Pick a person…</option>
+                 ${addable.map((p) => `<option value="${esc(p.id)}">${esc(p.id === s.me ? `${p.name} (you)` : p.name)}</option>`).join("")}
+               </select></label>` : ""}`;
+      }
       return `<div class="details">
         ${item.notes ? `<div class="details-notes">${esc(item.notes)}</div>` : ""}
         ${who}
@@ -712,6 +774,25 @@
       this._focusDraft("join-name");
     }
 
+    // Sign-up actions, updated on screen right away and confirmed by the next state load.
+    _claimPath(item, pid) { return `/items/${encodeURIComponent(item.id)}/claims${pid ? `/${encodeURIComponent(pid)}` : ""}`; }
+    _signUp(item, pid = this._state.me) {
+      const body = pid === this._state.me ? {} : { participantId: pid };
+      return this._do("POST", this._claimPath(item), body, {
+        optimistic: () => {
+          if (!this._isMulti(item) && pid !== this._state.me) item.claims = []; // family reassigning a one-person dish
+          if (!item.claims.some((c) => c.participantId === pid)) item.claims.push({ participantId: pid, done: false, createdAt: new Date().toISOString() });
+        },
+      });
+    }
+    _setMyDone(item, done) {
+      return this._do("PUT", this._claimPath(item, "me"), { done }, { optimistic: () => { const c = this._myClaim(item); if (c) c.done = done; } });
+    }
+    _dropOut(item, pid) {
+      const path = this._claimPath(item, pid === this._state.me ? "me" : pid);
+      return this._do("DELETE", path, undefined, { optimistic: () => { item.claims = item.claims.filter((c) => c.participantId !== pid); } });
+    }
+
     async _onClick(e) {
       const el = e.target.closest("[data-act]");
       if (!el || el.tagName === "SELECT" || !this._state) return;
@@ -731,10 +812,9 @@
           const st = this._stateOf(item);
           if (st === "open") {
             if (!s.me) return this._needName();
-            this._do("PUT", `/items/${encodeURIComponent(id)}`, { claimedBy: s.me }, { optimistic: () => { item.claimedBy = s.me; } });
+            this._signUp(item);
           } else if (this._isMine(item)) {
-            const done = !item.done;
-            this._do("PUT", `/items/${encodeURIComponent(id)}`, { done }, { optimistic: () => { item.done = done; } });
+            this._setMyDone(item, !this._myClaim(item).done);
           } else {
             this._openItem = this._openItem === id ? null : id;
             this.render();
@@ -744,24 +824,28 @@
         case "claim": {
           if (!s.me) return this._needName();
           const item = this._item(id);
-          if (item) this._do("PUT", `/items/${encodeURIComponent(id)}`, { claimedBy: s.me }, { optimistic: () => { item.claimedBy = s.me; } });
+          if (item) this._signUp(item);
           break;
         }
         case "unclaim": {
           const item = this._item(id);
-          if (item) this._do("PUT", `/items/${encodeURIComponent(id)}`, { claimedBy: null, done: false }, { optimistic: () => { item.claimedBy = null; item.done = false; } });
+          if (item) this._dropOut(item, s.me);
+          break;
+        }
+        case "remove-claim": {
+          const item = this._item(id);
+          const p = this._person(el.dataset.pid);
+          if (item && confirm(`Take ${p ? p.name : "them"} off "${item.name}"?`)) this._dropOut(item, el.dataset.pid);
           break;
         }
         case "toggle-ready": {
           const item = this._item(id);
-          if (!item) return;
-          const done = !item.done;
-          this._do("PUT", `/items/${encodeURIComponent(id)}`, { done }, { optimistic: () => { item.done = done; } });
+          if (item && this._isMine(item)) this._setMyDone(item, !this._myClaim(item).done);
           break;
         }
         case "edit-item":
           this._editingItem = id;
-          this._clearDrafts(`edit-name-${id}`, `edit-cat-${id}`, `edit-notes-${id}`);
+          this._clearDrafts(`edit-name-${id}`, `edit-cat-${id}`, `edit-wanted-${id}`, `edit-notes-${id}`);
           this.render();
           this._focusDraft(`edit-name-${id}`);
           break;
@@ -836,10 +920,14 @@
 
     _onChange(e) {
       const el = e.target;
+      const item = this._item(el.dataset.id);
+      if (!item) return;
       if (el.dataset.act === "assign") {
-        const item = this._item(el.dataset.id);
-        const claimedBy = el.value || null;
-        if (item) this._do("PUT", `/items/${encodeURIComponent(item.id)}`, { claimedBy }, { optimistic: () => { item.claimedBy = claimedBy; } });
+        // One-person dish: family picks who's bringing it (or nobody).
+        if (el.value) this._signUp(item, el.value);
+        else this._do("PUT", `/items/${encodeURIComponent(item.id)}`, { claimedBy: null }, { optimistic: () => { item.claimedBy = null; item.claims = []; } });
+      } else if (el.dataset.act === "add-person" && el.value) {
+        this._signUp(item, el.value);
       }
     }
 
@@ -882,20 +970,18 @@
           break;
         }
         case "bring": {
-          // "I'm bringing X": claim it if it's already on the menu and free, otherwise add it as yours.
+          // "I'm bringing X": sign up if it's already on the menu with room for you, otherwise add it as yours.
           const name = val("name");
           if (!name) return this._focusDraft("bring-name");
           this._clearDrafts("bring-name");
           form.querySelector("[name=name]").value = "";
-          const existing = s.items.find((i) => !i.claimedBy && i.name.trim().toLowerCase() === name.toLowerCase());
+          const existing = s.items.find((i) => i.name.trim().toLowerCase() === name.toLowerCase() && !this._isMine(i) && !this._full(i));
           if (existing) {
-            await this._do("PUT", `/items/${encodeURIComponent(existing.id)}`, { claimedBy: s.me }, {
-              optimistic: () => { existing.claimedBy = s.me; }, okMessage: `Thanks! You're bringing ${existing.name}`,
-            });
+            if (await this._signUp(existing)) this._showToast(`Thanks! You're bringing ${existing.name}`, true);
           } else {
             const category = guessCourse(name);
             await this._do("POST", "/items", { name, category, claimedBy: s.me }, {
-              optimistic: () => s.items.push({ id: `tmp-${Date.now()}`, name, category, notes: "", claimedBy: s.me, done: false, addedBy: s.me, createdAt: new Date().toISOString() }),
+              optimistic: () => s.items.push({ id: `tmp-${Date.now()}`, name, category, notes: "", wanted: 1, claims: [{ participantId: s.me, done: false }], addedBy: s.me, createdAt: new Date().toISOString() }),
               okMessage: `Added to ${COURSES[category].label}. Thanks!`,
             });
           }
@@ -908,7 +994,7 @@
           this._clearDrafts(`need-${course}`);
           this._addingIn = null;
           await this._do("POST", "/items", { name, category: course }, {
-            optimistic: () => s.items.push({ id: `tmp-${Date.now()}`, name, category: course, notes: "", claimedBy: null, done: false, addedBy: s.me, createdAt: new Date().toISOString() }),
+            optimistic: () => s.items.push({ id: `tmp-${Date.now()}`, name, category: course, notes: "", wanted: 1, claims: [], addedBy: s.me, createdAt: new Date().toISOString() }),
           });
           break;
         }
@@ -916,9 +1002,9 @@
           const id = form.dataset.id;
           const name = val("name");
           if (!name) return;
-          const body = { name, category: val("category"), notes: String(fd.get("notes") || "").trim() };
+          const body = { name, category: val("category"), wanted: Number(val("wanted") || 1), notes: String(fd.get("notes") || "").trim() };
           this._editingItem = null;
-          this._clearDrafts(`edit-name-${id}`, `edit-cat-${id}`, `edit-notes-${id}`);
+          this._clearDrafts(`edit-name-${id}`, `edit-cat-${id}`, `edit-wanted-${id}`, `edit-notes-${id}`);
           const item = this._item(id);
           await this._do("PUT", `/items/${encodeURIComponent(id)}`, body, { optimistic: () => { if (item) Object.assign(item, body); } });
           break;

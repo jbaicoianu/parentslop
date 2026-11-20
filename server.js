@@ -483,7 +483,7 @@ const FAMILY_SNAPSHOT_TABLES = [
   "completions", "redemptions", "balance_adjustments", "job_claims", "worklog_entries",
   "meal_options", "meal_votes", "meal_plan", "meal_log",
   "project_tracks", "projects", "project_members", "project_tasks", "project_picks",
-  "shared_menus", "shared_menu_participants", "shared_menu_items", "shared_menu_comments",
+  "shared_menus", "shared_menu_participants", "shared_menu_items", "shared_menu_comments", "shared_menu_claims",
   "user_balances", "field_versions",
 ];
 

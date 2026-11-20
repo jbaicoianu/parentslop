@@ -142,9 +142,61 @@ async function run(base) {
   assert((await req(`${G}/items/${gravy.id}`, { method: "PUT", cookie: guest, body: { claimedBy: null } })).json.claimedBy === null, "guest releases their own claim");
   assert((await req(`/api/shared-menus/${menuId}/items/${gravy.id}`, { method: "PUT", ...P, body: { claimedBy: friendId } })).json.claimedBy === friendId, "host can assign an item to a guest");
   assert((await req(`/api/shared-menus/${menuId}/items/${gravy.id}`, { method: "PUT", ...P, body: { claimedBy: "nobody" } })).status === 403, "can't assign to unknown participants");
-  const edited = await req(`${G}/items/${turkey.id}`, { method: "PUT", cookie: guest, body: { done: true, notes: "18 lb", name: "Turkey (brined)" } });
-  assert(edited.json.done && edited.json.notes === "18 lb" && edited.json.name === "Turkey (brined)", "anyone can tick off and edit items");
+  const edited = await req(`${G}/items/${turkey.id}`, { method: "PUT", cookie: guest, body: { notes: "18 lb", name: "Turkey (brined)" } });
+  assert(edited.json.notes === "18 lb" && edited.json.name === "Turkey (brined)", "anyone can edit items");
+  assert((await req(`${G}/items/${turkey.id}`, { method: "PUT", cookie: guest, body: { done: true } })).status === 403, "only whoever's bringing it marks it ready");
+  assert((await req(`/api/shared-menus/${menuId}/items/${turkey.id}`, { method: "PUT", ...P, body: { done: true } })).json.done, "the person bringing it marks it ready");
   assert((await req(`${G}/items/${turkey.id}`, { method: "PUT", cookie: guest, body: { name: "" } })).status === 400, "item name can't be blanked");
+
+  console.log("\n-- multi-person items --");
+  const H = `/api/shared-menus/${menuId}`;
+  st = (await req(`${H}/state`, P)).json;
+  const wine = st.items.find((i) => i.name === "Wine");
+  assert(wine.wanted === 0 && st.items.find((i) => i.name === "Gravy").wanted === 1, "template: wine is open-ended, gravy is one person");
+  assert((await req(`${G}/items/${wine.id}/claims`, { method: "POST", cookie: guest })).json.claims.length === 1, "guest signs up for the wine");
+  let w = (await req(`${H}/items/${wine.id}/claims`, { method: "POST", ...P })).json;
+  assert(w.claims.length === 2 && w.covered && !w.ready, "a second person can sign up for open-ended wine");
+  assert((await req(`${G}/items/${wine.id}/claims`, { method: "POST", cookie: guest })).json.claims.length === 2, "signing up twice is a no-op");
+  w = (await req(`${G}/items/${wine.id}/claims/me`, { method: "PUT", cookie: guest, body: { done: true } })).json;
+  assert(w.claims.find((c) => c.participantId === friendId).done && !w.ready, "each person marks their own part ready");
+  assert((await req(`${G}/items/${wine.id}/claims/${st.me}`, { method: "PUT", cookie: guest, body: { done: true } })).status === 403, "guests can't mark someone else's part ready");
+  w = (await req(`${H}/items/${wine.id}/claims/me`, { method: "PUT", ...P, body: { done: true } })).json;
+  assert(w.ready && w.done, "ready once everyone's part is ready");
+  assert((await req(`${G}/items/${wine.id}/claims/${st.me}`, { method: "DELETE", cookie: guest })).status === 403, "guests can't take someone else off it");
+  assert((await req(`${G}/items/${wine.id}/claims/me`, { method: "DELETE", cookie: guest })).json.claims.length === 1, "guests drop out of their own part");
+
+  const pies = (await req(`${H}/items`, { method: "POST", ...P, body: { name: "Pies", category: "desserts", wanted: 2 } })).json;
+  assert(pies.wanted === 2 && !pies.covered, "an item can need a set number of people");
+  assert((await req(`${H}/items`, { method: "POST", ...P, body: { name: "x", wanted: 99 } })).status === 400, "wanted is capped");
+  assert((await req(`${H}/items`, { method: "POST", ...P, body: { name: "x", wanted: "lots" } })).status === 400, "wanted must be a number");
+  await req(`${G}/items/${pies.id}/claims`, { method: "POST", cookie: guest });
+  const join2 = await req(`/api/m/${token}/join`, { method: "POST", body: { name: "Pat" } });
+  const pat = firstCookie(join2);
+  let pp = (await req(`/api/m/${token}/items/${pies.id}/claims`, { method: "POST", cookie: pat })).json;
+  assert(pp.claims.length === 2 && pp.covered, "two people fill a two-person item");
+  const kidPart = await req(`/api/m/${token}/items/${pies.id}/claims`, { method: "POST", cookie: kid.cookie });
+  assert(kidPart.status === 403 && /covered/.test(kidPart.json.error), "a full item turns away more sign-ups");
+  pp = (await req(`${H}/items/${pies.id}`, { method: "PUT", ...P, body: { wanted: 3 } })).json;
+  assert(pp.wanted === 3 && !pp.covered, "raising how many it needs reopens it");
+  pp = (await req(`${H}/items/${pies.id}/claims`, { method: "POST", ...P, body: { participantId: kidState.me } })).json;
+  assert(pp.claims.length === 3 && pp.claims.some((c) => c.participantId === kidState.me), "family can sign someone else up");
+  pp = (await req(`${H}/items/${pies.id}/claims/${friendId}`, { method: "DELETE", ...P })).json;
+  assert(pp.claims.length === 2 && !pp.claims.some((c) => c.participantId === friendId), "family can take someone off it");
+  assert((await req(`${G}/items/${pies.id}/claims`, { method: "POST", cookie: guest, body: { participantId: st.me } })).status === 403, "guests can only sign themselves up");
+
+  // The one-person API from before keeps working for pages loaded earlier.
+  const legacy = (await req(`${H}/items`, { method: "POST", ...P, body: { name: "Legacy rolls" } })).json;
+  let lg = (await req(`${G}/items/${legacy.id}`, { method: "PUT", cookie: guest, body: { claimedBy: friendId } })).json;
+  assert(lg.claimedBy === friendId && lg.claims.length === 1, "claimedBy still signs you up");
+  lg = (await req(`${G}/items/${legacy.id}`, { method: "PUT", cookie: guest, body: { done: true } })).json;
+  assert(lg.done && lg.claims[0].done, "done still marks your part ready");
+  lg = (await req(`${H}/items/${legacy.id}`, { method: "PUT", ...P, body: { claimedBy: st.me } })).json;
+  assert(lg.claimedBy === st.me && lg.claims.length === 1, "family reassigning a one-person item replaces whoever had it");
+  await req(`${H}/items/${legacy.id}`, { method: "DELETE", ...P });
+  await req(`${H}/items/${pies.id}`, { method: "DELETE", ...P });
+  st = (await req(`${H}/state`, P)).json;
+  assert(!st.items.some((i) => i.id === pies.id), "items with sign-ups can be deleted");
+  assert((await req(`${H}/items/${pies.id}/claims`, { method: "POST", ...P })).status === 404, "a deleted item takes no more sign-ups");
 
   console.log("\n-- comments --");
   const c1 = await req(`${G}/comments`, { method: "POST", cookie: guest, body: { itemId: pieId, body: "Is anyone allergic to nuts?" } });
@@ -188,7 +240,7 @@ async function run(base) {
   assert((await req(`/api/m/${token2}/state`, { cookie: guest })).json.me === friendId, "guests who joined keep their identity on the new link");
 
   const listAfter = (await req("/api/shared-menus", P)).json[0];
-  assert(listAfter.guestCount === 1 && listAfter.claimedCount >= 2, "list counts guests and claims");
+  assert(listAfter.guestCount === 2 && listAfter.claimedCount >= 2, "list counts guests and claims");
 
   console.log("\n-- per-menu names --");
   const M = `/api/shared-menus/${menuId}`;
