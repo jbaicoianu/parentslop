@@ -382,7 +382,14 @@
       }
     }
 
-    _clearDrafts(...keys) { for (const k of keys) delete this._drafts[k]; }
+    // Forget drafts and blank their inputs too; otherwise the next render saves the old text right back.
+    _clearDrafts(...keys) {
+      for (const k of keys) {
+        delete this._drafts[k];
+        const el = this.shadowRoot.querySelector(`[data-draft="${CSS.escape(k)}"]`);
+        if (el && el.tagName !== "SELECT") el.value = "";
+      }
+    }
 
     _focusDraft(key) { this.shadowRoot.querySelector(`[data-draft="${CSS.escape(key)}"]`)?.focus(); }
 
