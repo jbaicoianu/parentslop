@@ -223,7 +223,7 @@
       this._editingItem = null;
       this._editingMenu = false;
       this._renaming = false;
-      this._addingIn = null; // course with its "add something we need" box open
+      this._addingIn = null; // course with its "+ Add ..." box open
       this._linkOpts = false;
       this._drafts = {};
       this._toast = null;
@@ -557,10 +557,10 @@
         const adding = this._addingIn === c;
         const addUi = !s.me ? "" : adding
           ? `<form class="row add-inline" data-form="add-needed" data-course="${c}">
-               <input type="text" name="name" data-draft="need-${c}" maxlength="120" placeholder="${esc(`Add ${info.one} we need…`)}" />
+               <input type="text" name="name" data-draft="need-${c}" maxlength="120" placeholder="${esc(`Add ${info.one}…`)}" />
                <button class="btn" type="submit">Add</button>
              </form>`
-          : `<div class="add-to-course"><button class="link" data-act="add-in" data-course="${c}">+ Add ${esc(info.one)} we need</button></div>`;
+          : `<div class="add-to-course"><button class="link" data-act="add-in" data-course="${c}">+ Add ${esc(info.one)}</button></div>`;
         return `<section>
           <div class="course-head"><span aria-hidden="true">${info.icon}</span><span>${esc(info.label)}</span>${items.length ? `<span class="count">${items.length}</span>` : ""}</div>
           ${items.length ? `<ul class="items">${items.map((i) => this._renderItem(i)).join("")}</ul>` : ""}
