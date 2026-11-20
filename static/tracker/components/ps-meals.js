@@ -60,46 +60,60 @@ class PsMeals extends HTMLElement {
     const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     if (this._sharedOpenId) {
       return `<div class="shared-detail">
-        <button class="btn btn-small" data-action="shared-back">← All shared menus</button>
+        <button class="btn btn-small" data-action="shared-back">← Back</button>
         <div id="shared-slot"></div>
       </div>`;
     }
     const isAdmin = tracker.isCurrentUserAdmin();
     const menus = this._sharedMenus;
     const today = this._todayStr();
+    const emojiFor = customElements.get("ps-shared-menu")?.emojiFor || (() => "\u{1F37D}️");
     const newForm = this._showNewShared ? `
-      <div class="meal-form shared-new">
-        <input type="text" class="input" id="shared-title" maxlength="120" value="Thanksgiving dinner" placeholder="What are you planning?" />
-        <input type="date" class="input" id="shared-date" value="${this._nextThanksgiving()}" />
-        <select class="input" id="shared-template">
-          <option value="thanksgiving">Start with a Thanksgiving checklist</option>
-          <option value="">Start empty</option>
-        </select>
+      <div class="shared-new">
+        <label class="shared-label">What are you planning?
+          <input type="text" class="input" id="shared-title" maxlength="120" value="Thanksgiving dinner" />
+        </label>
+        <label class="shared-label">When?
+          <input type="date" class="input" id="shared-date" value="${this._nextThanksgiving()}" />
+        </label>
+        <label class="shared-check"><input type="checkbox" id="shared-template" checked />
+          <span>Start with the Thanksgiving classics<br><small>Turkey, stuffing, pies and more. You can remove anything.</small></span></label>
         <div class="form-actions">
-          <button class="btn btn-primary" data-action="shared-create">Create</button>
+          <button class="btn btn-primary" data-action="shared-create">Create menu</button>
           <button class="btn" data-action="shared-cancel-new">Cancel</button>
         </div>
       </div>` : "";
-    let list;
+    let list = "";
     if (menus === null) list = `<div class="empty">Loading…</div>`;
-    else if (!menus.length) list = `<div class="empty">No shared menus yet. Plan a potluck or holiday meal with friends: share a link, and everyone can add dishes, claim what they're bringing and comment.</div>`;
-    else {
+    else if (menus.length) {
       list = menus.map((m) => {
         const past = m.eventDate && m.eventDate < today;
-        const date = m.eventDate ? new Date(m.eventDate + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "No date";
-        const open = m.itemCount - m.claimedCount;
+        const date = m.eventDate ? new Date(m.eventDate + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "";
+        const status = !m.itemCount ? "Nothing on the menu yet"
+          : m.claimedCount === m.itemCount ? "Everything's covered \u{1F389}"
+          : `${m.claimedCount} of ${m.itemCount} covered`;
         return `<button class="shared-card ${past ? "past" : ""}" data-action="shared-open" data-id="${esc(m.id)}">
-          <div class="shared-card-title">${esc(m.title)}</div>
-          <div class="shared-card-meta">${esc(date)} · ${m.itemCount} item${m.itemCount === 1 ? "" : "s"}${m.itemCount ? ` · ${open ? `${open} unclaimed` : "all claimed"}` : ""}${m.guestCount ? ` · ${m.guestCount} guest${m.guestCount === 1 ? "" : "s"}` : ""}${m.shareEnabled ? "" : " · \u{1F512} link off"}</div>
+          <span class="shared-card-emoji">${emojiFor(m.title)}</span>
+          <span class="shared-card-text">
+            <span class="shared-card-title">${esc(m.title)}</span>
+            <span class="shared-card-meta">${date ? `${esc(date)} · ` : ""}${status}</span>
+          </span>
+          <span class="shared-card-go">›</span>
         </button>`;
       }).join("");
     }
+    const intro = !this._showNewShared && menus && !menus.length
+      ? `<div class="shared-empty">
+          <div class="shared-empty-emoji">\u{1F983}</div>
+          <div class="shared-empty-title">Plan a meal with friends</div>
+          <div class="shared-empty-text">Make a menu, send the link, and everyone signs up to bring something.</div>
+          ${isAdmin ? `<button class="btn btn-primary" data-action="shared-new">Start a menu</button>` : ""}
+        </div>`
+      : "";
     return `
-      <div class="shared-head">
-        <div class="shared-intro">Menus you plan together with friends and family outside the house.</div>
-        ${isAdmin && !this._showNewShared ? `<button class="btn btn-primary btn-small" data-action="shared-new">+ New shared menu</button>` : ""}
-      </div>
+      ${menus && menus.length && isAdmin && !this._showNewShared ? `<div class="shared-head"><button class="btn btn-primary btn-small" data-action="shared-new">+ New menu</button></div>` : ""}
       ${newForm}
+      ${intro}
       <div class="shared-list">${list}</div>`;
   }
 
@@ -138,7 +152,7 @@ class PsMeals extends HTMLElement {
       try {
         const menu = await tracker.apiFetch("/api/shared-menus", {
           method: "POST",
-          body: JSON.stringify({ title, eventDate: sr.getElementById("shared-date")?.value || "", template: sr.getElementById("shared-template")?.value || "" }),
+          body: JSON.stringify({ title, eventDate: sr.getElementById("shared-date")?.value || "", template: sr.getElementById("shared-template")?.checked ? "thanksgiving" : "" }),
         });
         this._sharedMenus = null;
         this._openSharedMenu(menu.id);
@@ -730,16 +744,27 @@ class PsMeals extends HTMLElement {
       .week-cell.today { border-color: rgba(74, 222, 128, 0.3); }
 
       /* Shared menus */
-      .shared-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
-      .shared-intro { font-size: 0.82rem; color: #a0a4be; }
-      .shared-new { margin-bottom: 14px; }
-      .shared-list { display: flex; flex-direction: column; gap: 8px; }
-      .shared-card { text-align: left; background: #12131f; border: 1px solid #25273a; border-radius: 14px; padding: 12px 14px;
-                     color: #e2e4f0; cursor: pointer; font: inherit; }
-      .shared-card:hover { border-color: #3a3d55; }
+      .shared-head { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+      .shared-new { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; padding: 16px; background: #12131f;
+                    border: 1px solid #25273a; border-radius: 16px; }
+      .shared-label { display: flex; flex-direction: column; gap: 6px; font-size: 0.85rem; font-weight: 600; color: #e2e4f0; }
+      .shared-check { display: flex; gap: 10px; align-items: flex-start; font-size: 0.9rem; color: #e2e4f0; cursor: pointer; }
+      .shared-check input { margin-top: 3px; width: 18px; height: 18px; accent-color: #f59e0b; }
+      .shared-check small { color: #a0a4be; }
+      .shared-empty { text-align: center; padding: 30px 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+      .shared-empty-emoji { font-size: 2.8rem; }
+      .shared-empty-title { font-size: 1.15rem; font-weight: 800; color: #e2e4f0; }
+      .shared-empty-text { font-size: 0.9rem; color: #a0a4be; max-width: 320px; margin-bottom: 8px; }
+      .shared-list { display: flex; flex-direction: column; gap: 10px; }
+      .shared-card { display: flex; align-items: center; gap: 14px; text-align: left; background: #12131f; border: 1px solid #25273a;
+                     border-radius: 16px; padding: 14px 16px; color: #e2e4f0; cursor: pointer; font: inherit; }
+      .shared-card:hover { border-color: #f59e0b; }
       .shared-card.past { opacity: 0.6; }
-      .shared-card-title { font-weight: 700; font-size: 0.98rem; }
-      .shared-card-meta { font-size: 0.78rem; color: #a0a4be; margin-top: 3px; }
+      .shared-card-emoji { font-size: 1.9rem; }
+      .shared-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+      .shared-card-title { font-weight: 700; font-size: 1.02rem; }
+      .shared-card-meta { font-size: 0.82rem; color: #a0a4be; }
+      .shared-card-go { font-size: 1.6rem; color: #6b6f88; }
       .shared-detail > .btn { margin-bottom: 12px; }
     `;
 
