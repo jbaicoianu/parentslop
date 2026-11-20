@@ -190,6 +190,28 @@ async function run(base) {
   const listAfter = (await req("/api/shared-menus", P)).json[0];
   assert(listAfter.guestCount === 1 && listAfter.claimedCount >= 2, "list counts guests and claims");
 
+  console.log("\n-- per-menu names --");
+  const M = `/api/shared-menus/${menuId}`;
+  const meName = (state) => state.participants.find((p) => p.id === state.me)?.name;
+  let named = await req(`${M}/me`, { method: "PUT", ...P, body: { name: "James" } });
+  assert(named.status === 200 && meName(named.json) === "James" && named.json.customName && named.json.profileName === "Parent", "family member picks a different name for this menu");
+  named = (await req(`${M}/state`, P)).json;
+  assert(meName(named) === "James", "the menu name sticks instead of snapping back to the profile name");
+  assert(meName((await req(`/api/m/${token2}/state`, P)).json) === "James", "same name when following the link");
+  const guestView = (await req(`/api/m/${token2}/state`, { cookie: guest })).json;
+  assert(guestView.participants.some((p) => p.name === "James") && !guestView.participants.some((p) => p.name === "Parent"), "guests see the menu name, not the profile name");
+  assert(guestView.profileName === undefined && guestView.customName === undefined, "guests don't see family profile names");
+  named = await req(`${M}/me`, { method: "PUT", ...P, body: { name: "" } });
+  assert(meName(named.json) === "Parent" && !named.json.customName, "clearing it goes back to the profile name");
+  assert((await req(`/api/m/${token2}/me`, { method: "PUT", cookie: guest, body: { name: "Sammy" } })).json.participants.some((p) => p.id === friendId && p.name === "Sammy"), "guests rename themselves");
+  assert((await req(`/api/m/${token2}/me`, { method: "PUT", cookie: guest, body: { name: " " } })).status === 400, "guests can't blank their name");
+  assert((await req(`/api/m/${token2}/me`, { method: "PUT", body: { name: "Nobody" } })).status === 403, "can't rename before joining");
+  const other2 = await req("/api/shared-menus", { method: "POST", ...P, body: { title: "Friendsgiving", displayName: "Jim" } });
+  const o2 = (await req(`/api/shared-menus/${other2.json.id}/state`, P)).json;
+  assert(meName(o2) === "Jim" && o2.customName, "a name can be set when creating a menu");
+  assert(meName((await req(`${M}/state`, P)).json) === "Parent", "names are per menu");
+  await req(`/api/shared-menus/${other2.json.id}`, { method: "DELETE", ...P });
+
   console.log("\n-- delete menu --");
   assert((await req(`/api/shared-menus/${menuId}`, { method: "DELETE", cookie: kid.cookie })).status === 403, "kids can't delete menus");
   assert((await req(`/api/shared-menus/${menuId}`, { method: "DELETE", ...P })).status === 200, "parent deletes the menu");

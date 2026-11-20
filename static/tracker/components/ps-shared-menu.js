@@ -102,6 +102,11 @@
     .stack .avatar:first-child { margin-left: 0; }
     .hero-links { margin-top: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
     .hero .link { color: #ffe7c2; text-decoration: underline; text-underline-offset: 3px; }
+    .rename { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .rename input[type=text] { background: rgba(0,0,0,0.28); border-color: rgba(255,255,255,0.25); color: #fff8ee; }
+    .rename input[type=text]::placeholder { color: rgba(255,248,238,0.6); }
+    .rename .btn { background: rgba(0,0,0,0.25); border-color: rgba(255,255,255,0.3); color: #fff8ee; }
+    .rename-hint { font-size: 0.82rem; opacity: 0.9; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
 
     .avatar { width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--c); color: #1a1208; display: inline-flex;
               align-items: center; justify-content: center; font-weight: 800; font-size: 0.8rem; }
@@ -448,14 +453,26 @@
         ? `<div class="hero-people"><span class="stack">${ordered.slice(0, 6).map((p) => this._avatar(p, "sm")).join("")}</span><span>${esc(sentence)}</span></div>`
         : "";
       const links = [];
-      if (host && me) links.push(`<button class="link" data-act="edit-menu">Edit details</button>`);
+      if (host && me) {
+        links.push(`<button class="link" data-act="edit-menu">Edit details</button>`);
+        links.push(`<button class="link" data-act="rename">Your name here: ${esc(me.name)}</button>`);
+      }
       if (!host && me) links.push(`<button class="link" data-act="rename">Not ${esc(me.name)}? Change name</button>`);
-      const rename = this._renaming && me
-        ? `<form class="row" data-form="rename" style="margin-top:12px">
-             <input type="text" name="name" data-draft="rename" maxlength="40" value="${esc(me.name)}" required />
-             <button class="btn" type="submit">Save</button>
-           </form>`
-        : "";
+      let rename = "";
+      if (this._renaming && me) {
+        const { profileName, customName } = this._state;
+        const hint = host
+          ? `<div class="rename-hint">How you show up to everyone on this menu. Your family profile stays “${esc(profileName)}”.
+               ${customName ? `<button type="button" class="link" data-act="reset-name">Use “${esc(profileName)}” again</button>` : ""}</div>`
+          : "";
+        rename = `<form class="rename" data-form="rename">
+            <div class="row">
+              <input type="text" name="name" data-draft="rename" maxlength="40" value="${esc(me.name)}" placeholder="Your name" required />
+              <button class="btn" type="submit">Save</button>
+            </div>
+            ${hint}
+          </form>`;
+      }
       return `<section class="hero">
         <div class="hero-emoji" aria-hidden="true">${emojiFor(menu.title)}</div>
         <h1>${esc(menu.title)}</h1>
@@ -728,6 +745,13 @@
           this.render();
           if (this._renaming) this._focusDraft("rename");
           break;
+        case "reset-name": {
+          this._renaming = false;
+          this._clearDrafts("rename");
+          const me = this._person(s.me);
+          await this._do("PUT", "/me", { name: "" }, { optimistic: () => { if (me) me.name = s.profileName; } });
+          break;
+        }
         case "copy-link": this._copyLink(); break;
         case "native-share":
           navigator.share({ title: s.menu.title, text: `Help plan ${s.menu.title}! Sign up to bring something:`, url: this._shareUrl() }).catch(() => {});
@@ -804,7 +828,8 @@
           if (!name) return;
           this._renaming = false;
           this._clearDrafts("rename");
-          await this._do("POST", "/join", { name });
+          const me = this._person(s.me);
+          await this._do("PUT", "/me", { name }, { optimistic: () => { if (me) me.name = name; } });
           break;
         }
         case "bring": {

@@ -76,6 +76,10 @@ class PsMeals extends HTMLElement {
         <label class="shared-label">When?
           <input type="date" class="input" id="shared-date" value="${this._nextThanksgiving()}" />
         </label>
+        <label class="shared-label">Your name on this menu
+          <input type="text" class="input" id="shared-myname" maxlength="40" value="${esc(tracker.getCurrentUser()?.name || "")}" />
+          <small class="shared-help">What your guests will see. You can change it later.</small>
+        </label>
         <label class="shared-check"><input type="checkbox" id="shared-template" checked />
           <span>Start with the Thanksgiving classics<br><small>Turkey, stuffing, pies and more. You can remove anything.</small></span></label>
         <div class="form-actions">
@@ -152,7 +156,12 @@ class PsMeals extends HTMLElement {
       try {
         const menu = await tracker.apiFetch("/api/shared-menus", {
           method: "POST",
-          body: JSON.stringify({ title, eventDate: sr.getElementById("shared-date")?.value || "", template: sr.getElementById("shared-template")?.checked ? "thanksgiving" : "" }),
+          body: JSON.stringify({
+            title,
+            eventDate: sr.getElementById("shared-date")?.value || "",
+            displayName: sr.getElementById("shared-myname")?.value?.trim() || "",
+            template: sr.getElementById("shared-template")?.checked ? "thanksgiving" : "",
+          }),
         });
         this._sharedMenus = null;
         this._openSharedMenu(menu.id);
@@ -748,6 +757,7 @@ class PsMeals extends HTMLElement {
       .shared-new { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; padding: 16px; background: #12131f;
                     border: 1px solid #25273a; border-radius: 16px; }
       .shared-label { display: flex; flex-direction: column; gap: 6px; font-size: 0.85rem; font-weight: 600; color: #e2e4f0; }
+      .shared-help { font-weight: 400; color: #a0a4be; font-size: 0.78rem; }
       .shared-check { display: flex; gap: 10px; align-items: flex-start; font-size: 0.9rem; color: #e2e4f0; cursor: pointer; }
       .shared-check input { margin-top: 3px; width: 18px; height: 18px; accent-color: #f59e0b; }
       .shared-check small { color: #a0a4be; }
